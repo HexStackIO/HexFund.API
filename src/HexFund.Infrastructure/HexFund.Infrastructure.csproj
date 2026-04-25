@@ -12,11 +12,13 @@
 	</ItemGroup>
 
 	<ItemGroup>
+		<PackageReference Include="Azure.Identity" Version="1.11.4" />
 		<PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.*" />
 		<PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.*">
 			<PrivateAssets>all</PrivateAssets>
 			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
 		</PackageReference>
+		<PackageReference Include="Microsoft.Graph" Version="5.104.0" />
 		<PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.*" />
 
 		<!-- Caching for performance optimization -->

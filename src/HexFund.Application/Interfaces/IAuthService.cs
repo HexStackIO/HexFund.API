@@ -14,4 +14,11 @@ public interface IAuthService
     /// Returns the updated UserDto, or null if the user was not found.
     /// </summary>
     Task<UserDto?> UpdateProfileAsync(Guid userId, UpdateProfileRequest request);
+
+    /// <summary>
+    /// Permanently deletes the user record and all associated data
+    /// (accounts, transactions, categories) via DB cascade.
+    /// Returns false if the user was not found.
+    /// </summary>
+    Task<bool> DeleteUserAsync(Guid userId);
 }

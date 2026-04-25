@@ -53,13 +53,29 @@ public class UserRepository : IUserRepository
 
     public async Task<bool> DeleteAsync(Guid userId)
     {
-        var user = await _context.Users.FindAsync(userId);
-        if (user == null)
-            return false;
+        // Use ExecuteDeleteAsync to emit a single DELETE statement rather than
+        // loading the entity into the change tracker and letting EF generate
+        // individual deletes. This is critical because the Transactions table has
+        // a self-referential FK (PredecessorTransactionId → TransactionId ON DELETE
+        // SET NULL). If EF loads and deletes tracked entities individually it may
+        // issue DELETEs in an order that conflicts with that self-reference before
+        // the database cascade can resolve it.
+        //
+        // A single DELETE FROM Users WHERE UserId = X lets PostgreSQL execute the
+        // full cascade in the correct dependency order internally:
+        //   1. SET NULL on Transactions.PredecessorTransactionId (self-ref)
+        //   2. DELETE Transactions (via Account → CASCADE)
+        //   3. DELETE Accounts (via User → CASCADE)
+        //   4. DELETE UserCategories (via User → CASCADE)
+        //   5. DELETE User row
+        //
+        // ExecuteDeleteAsync bypasses the change tracker entirely and returns the
+        // number of rows affected at the root (Users) table.
+        var rowsDeleted = await _context.Users
+            .Where(u => u.UserId == userId)
+            .ExecuteDeleteAsync();
 
-        _context.Users.Remove(user);
-        await _context.SaveChangesAsync();
-        return true;
+        return rowsDeleted > 0;
     }
 
     public async Task<bool> ExistsAsync(string email)
