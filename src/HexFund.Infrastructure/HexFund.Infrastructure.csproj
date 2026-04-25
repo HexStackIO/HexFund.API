@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\HexFund.Core\HexFund.Core.csproj" />
+		<ProjectReference Include="..\HexFund.Application\HexFund.Application.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.*" />
+		<PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.*">
+			<PrivateAssets>all</PrivateAssets>
+			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+		</PackageReference>
+		<PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.*" />
+
+		<!-- Caching for performance optimization -->
+		<PackageReference Include="Microsoft.Extensions.Caching.Abstractions" Version="8.0.*" />
+	</ItemGroup>
+
+</Project>

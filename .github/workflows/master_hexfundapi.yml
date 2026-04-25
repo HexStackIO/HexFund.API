@@ -1,0 +1,104 @@
+# HexFund API — Build, Migrate & Deploy to Azure Web App
+# Docs: https://github.com/Azure/webapps-deploy
+
+name: Build and deploy ASP.NET Core app to Azure Web App - hexfundapi
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '10.x'
+  PROJECT_PATH: 'src/HexFund.API/HexFund.API.csproj'
+  INFRA_PROJECT_PATH: 'src/HexFund.Infrastructure/HexFund.Infrastructure.csproj'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET Core
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Run tests
+        run: dotnet test --configuration Release --no-build --verbosity normal
+
+      - name: Publish
+        run: dotnet publish ${{ env.PROJECT_PATH }} -c Release -o "${{ runner.temp }}/hexfund-app" --no-build
+
+      - name: Upload artifact for deployment job
+        uses: actions/upload-artifact@v4
+        with:
+          name: hexfund-app
+          path: ${{ runner.temp }}/hexfund-app
+          retention-days: 1
+
+  migrate:
+    runs-on: ubuntu-latest
+    needs: build
+    environment: production
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET Core
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore NuGet packages
+        run: dotnet restore
+
+      - name: Install EF Core tools
+        run: dotnet tool install --global dotnet-ef
+
+      - name: Run migrations
+        run: |
+          dotnet ef database update \
+            --project ${{ env.INFRA_PROJECT_PATH }} \
+            --startup-project ${{ env.PROJECT_PATH }} \
+            --connection "${{ secrets.AZURE_POSTGRESQL_CONNECTION_STRING }}"
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: migrate
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: hexfund-app
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_A32DA55B18AD40278DFA84CCFD3C8366 }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_D3D717180CDE4557B376806CD3A638E0 }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_816DC884A9154782911FA2B6A50FEACC }}
+
+      - name: Deploy to Azure Web App
+        id: deploy-to-webapp
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: 'hexfundapi'
+          slot-name: 'Production'
+          package: .
