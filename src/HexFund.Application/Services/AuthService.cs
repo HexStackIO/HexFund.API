@@ -2,16 +2,24 @@ using HexFund.Application.DTOs;
 using HexFund.Application.Interfaces;
 using HexFund.Core.Entities;
 using HexFund.Core.Interfaces;
+using Microsoft.Extensions.Logging;
 
 namespace HexFund.Application.Services;
 
 public class AuthService : IAuthService
 {
     private readonly IUserRepository _userRepository;
+    private readonly IEntraUserService _entraUserService;
+    private readonly ILogger<AuthService> _logger;
 
-    public AuthService(IUserRepository userRepository)
+    public AuthService(
+        IUserRepository userRepository,
+        IEntraUserService entraUserService,
+        ILogger<AuthService> logger)
     {
-        _userRepository = userRepository;
+        _userRepository   = userRepository;
+        _entraUserService = entraUserService;
+        _logger           = logger;
     }
 
     /// <summary>
@@ -89,6 +97,55 @@ public class AuthService : IAuthService
         await _userRepository.UpdateAsync(user);
 
         return MapToUserDto(user);
+    }
+
+    /// <summary>
+    /// Permanently deletes the user's local database records AND their
+    /// Entra External ID account. Order is deliberate:
+    ///
+    ///   1. Delete Entra account first — if this fails we abort before touching
+    ///      the database, so the user can retry. Their data is still intact.
+    ///   2. Delete local DB records — ExecuteDeleteAsync cascades atomically
+    ///      through Accounts → Transactions and User → UserCategories.
+    ///
+    /// A 404 from Entra (account already gone) is treated as non-fatal so a
+    /// partially-deleted state from a previous attempt can still be cleaned up.
+    /// </summary>
+    public async Task<bool> DeleteUserAsync(Guid userId)
+    {
+        // Fetch the Entra object ID before we delete the DB row.
+        var user = await _userRepository.GetByIdAsync(userId);
+        if (user == null)
+        {
+            _logger.LogWarning("DeleteUserAsync: no DB record found for {UserId}", userId);
+            return false;
+        }
+
+        // Step 1 — Entra deletion (fail fast if unexpected error)
+        if (!string.IsNullOrEmpty(user.EntraObjectId))
+        {
+            try
+            {
+                await _entraUserService.DeleteUserAsync(user.EntraObjectId);
+            }
+            catch (Exception ex)
+            {
+                // Unexpected Graph API error (permissions, service outage, etc.)
+                // Abort without touching the DB so the user can retry.
+                _logger.LogError(ex,
+                    "Failed to delete Entra user {EntraObjectId} for {UserId}. DB records preserved.",
+                    user.EntraObjectId, userId);
+                throw;
+            }
+        }
+        else
+        {
+            _logger.LogWarning(
+                "User {UserId} has no EntraObjectId — skipping Entra deletion.", userId);
+        }
+
+        // Step 2 — Database deletion (single-statement cascade)
+        return await _userRepository.DeleteAsync(userId);
     }
 
     private static UserDto MapToUserDto(User user) => new()

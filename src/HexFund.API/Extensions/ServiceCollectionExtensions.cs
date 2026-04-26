@@ -4,6 +4,7 @@ using HexFund.Core.Interfaces;
 using HexFund.Infrastructure.Caching;
 using HexFund.Infrastructure.Data;
 using HexFund.Infrastructure.Repositories;
+using HexFund.Infrastructure.Services;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
@@ -55,6 +56,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ICategoryService, CategoryService>();
         services.AddScoped<TransactionRecurrenceService>();
         services.AddScoped<ICacheService, CacheService>();
+        services.AddScoped<IEntraUserService, EntraUserService>();
 
         return services;
     }

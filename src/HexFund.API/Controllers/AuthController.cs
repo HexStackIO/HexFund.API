@@ -77,4 +77,40 @@ public class AuthController : ApiControllerBase
         _logger.LogInformation("Profile updated for user {UserId}", userId);
         return Ok(updated);
     }
+
+    /// <summary>
+    /// Permanently deletes the authenticated user's account and all associated
+    /// data: accounts, transactions (including amendment history), and categories.
+    ///
+    /// Deletion is irreversible. The cascade is handled at the database level:
+    ///   User → Accounts (CASCADE) → Transactions (CASCADE)
+    ///   User → UserCategories (CASCADE)
+    ///
+    /// The client is responsible for revoking its local MSAL token cache after
+    /// receiving a 204 response. Google Play / App Store data deletion policy
+    /// requires this endpoint to be reachable from within the app itself.
+    /// </summary>
+    [HttpDelete("user")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> DeleteUser()
+    {
+        var userId = GetCurrentUserId();
+
+        _logger.LogWarning(
+            "Account deletion requested for user {UserId}. All data will be permanently removed.",
+            userId);
+
+        var deleted = await _authService.DeleteUserAsync(userId);
+
+        if (!deleted)
+        {
+            _logger.LogWarning("DeleteUser: user {UserId} not found", userId);
+            return NotFound(new { message = "User not found." });
+        }
+
+        _logger.LogWarning("Account permanently deleted for user {UserId}", userId);
+        return NoContent();
+    }
 }
