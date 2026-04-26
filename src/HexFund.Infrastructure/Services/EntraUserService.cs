@@ -8,19 +8,27 @@ using Microsoft.Graph.Models.ODataErrors;
 namespace HexFund.Infrastructure.Services;
 
 /// <summary>
-/// Deletes users from Entra External ID via the Microsoft Graph API using
-/// client credentials (app-only) authentication.
+/// Deletes users from Entra External ID (CIAM) via the Microsoft Graph API
+/// using client credentials (app-only) authentication.
+///
+/// Root cause of the production 404:
+///   The default GraphServiceClient credential resolves tokens against
+///   login.microsoftonline.com (global AAD). CIAM tenants use a
+///   tenant-specific authority (e.g. financeplannerapp.ciamlogin.com).
+///   A token issued by the wrong authority is accepted by Graph but
+///   resolves against the wrong directory, so every user ID returns 404.
+///   Pointing TokenCredentialOptions.AuthorityHost at the CIAM instance
+///   ensures the token is issued by and validated against the correct tenant.
 ///
 /// Required app registration permissions (application, not delegated):
-///   Microsoft Graph → User.ReadWrite.All  (or Directory.ReadWrite.All)
-///   Admin consent must be granted.
+///   Microsoft Graph → User.ReadWrite.All
+///   Admin consent must be granted in the CIAM tenant.
 ///
-/// Required appsettings / environment variables:
-///   AzureAd:TenantId      — your Entra tenant ID
-///   AzureAd:ClientId      — your app registration client ID
-///   AzureAd:ClientSecret  — a client secret for the app registration
-///                           (set via environment variable in production,
-///                            never commit to source control)
+/// Required config / environment variables:
+///   AzureAd:TenantId      — CIAM tenant ID (GUID)
+///   AzureAd:ClientId      — app registration client ID
+///   AzureAd:ClientSecret  — client secret (env var only, never in source)
+///   AzureAd:Instance      — CIAM base, e.g. "https://financeplannerapp.ciamlogin.com/"
 /// </summary>
 public class EntraUserService : IEntraUserService
 {
@@ -38,13 +46,27 @@ public class EntraUserService : IEntraUserService
         var clientSecret = configuration["AzureAd:ClientSecret"]
                            ?? throw new InvalidOperationException(
                                "AzureAd:ClientSecret is not configured. " +
-                               "Set this via environment variable in production, never in appsettings.json.");
+                               "Set this via environment variable in production.");
+        var instance     = configuration["AzureAd:Instance"]
+                           ?? throw new InvalidOperationException("AzureAd:Instance is not configured.");
 
-        // ClientSecretCredential uses the OAuth 2.0 client credentials grant —
-        // app-only auth, no user context needed.
-        var credential = new ClientSecretCredential(tenantId, clientId, clientSecret);
+        // Build the CIAM-specific authority URI from the Instance + TenantId.
+        // e.g. https://financeplannerapp.ciamlogin.com/{tenantId}
+        // Without this, ClientSecretCredential defaults to login.microsoftonline.com
+        // which issues a token for the global AAD directory — causing all CIAM
+        // user lookups to return 404.
+        var authorityHost = new Uri($"{instance.TrimEnd('/')}/{tenantId}");
 
-        _graphClient = new GraphServiceClient(credential,
+        var credential = new ClientSecretCredential(
+            tenantId,
+            clientId,
+            clientSecret,
+            new TokenCredentialOptions { AuthorityHost = authorityHost });
+
+        // The Graph base URL (https://graph.microsoft.com/v1.0) is correct for
+        // CIAM — the fix is entirely in the token authority above.
+        _graphClient = new GraphServiceClient(
+            credential,
             new[] { "https://graph.microsoft.com/.default" });
     }
 
@@ -52,10 +74,6 @@ public class EntraUserService : IEntraUserService
     {
         try
         {
-            // Graph DELETE /users/{id} — in Entra External ID (CIAM) tenants
-            // this permanently removes the user. In standard AAD tenants it
-            // moves them to the soft-delete bin (30-day recovery window).
-            // Verify the behaviour in your Azure portal for your tenant type.
             await _graphClient.Users[entraObjectId].DeleteAsync();
 
             _logger.LogWarning(
@@ -68,11 +86,11 @@ public class EntraUserService : IEntraUserService
         {
             // Not found — already deleted or never fully synced. Non-fatal.
             _logger.LogWarning(
-                "Entra user {EntraObjectId} not found in directory (already removed?).",
+                "Entra user {EntraObjectId} not found in Entra directory (already removed?).",
                 entraObjectId);
             return false;
         }
-        // Any other error (403 permission denied, 503, etc.) propagates so
-        // AuthService can surface a meaningful error to the client.
+        // 403 (missing permissions / consent), 503 (Graph outage), etc.
+        // propagate so AuthService can abort and surface a clear error.
     }
 }
