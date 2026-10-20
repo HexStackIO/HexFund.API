@@ -67,6 +67,59 @@ namespace HexFund.Infrastructure.Migrations
                     b.ToTable("Accounts");
                 });
 
+            modelBuilder.Entity("HexFund.Core.Entities.Feedback", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Body")
+                        .IsRequired()
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<string>("DiagnosticsJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<int?>("GitHubIssueNumber")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateTimeOffset?>("ModifiedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("NextAttemptAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("OutboxStatus")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Type")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("OutboxStatus", "NextAttemptAt");
+
+                    b.ToTable("Feedback", (string)null);
+                });
+
             modelBuilder.Entity("HexFund.Core.Entities.Transaction", b =>
                 {
                     b.Property<Guid>("TransactionId")
@@ -211,6 +264,17 @@ namespace HexFund.Infrastructure.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("HexFund.Core.Entities.Feedback", b =>
+                {
+                    b.HasOne("HexFund.Core.Entities.User", "User")
+                        .WithMany("Feedback")
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("User");
+                });
+
             modelBuilder.Entity("HexFund.Core.Entities.Transaction", b =>
                 {
                     b.HasOne("HexFund.Core.Entities.Account", "Account")
@@ -248,6 +312,8 @@ namespace HexFund.Infrastructure.Migrations
                     b.Navigation("Accounts");
 
                     b.Navigation("Categories");
+
+                    b.Navigation("Feedback");
                 });
 #pragma warning restore 612, 618
         }
