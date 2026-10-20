@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO.Compression;
 using System.Security.Claims;
 using System.Threading.RateLimiting;
@@ -10,6 +11,7 @@ using HexFund.Infrastructure.Data;
 using HexFund.Infrastructure.Repositories;
 using HexFund.Infrastructure.Services;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.EntityFrameworkCore;
@@ -134,6 +136,41 @@ public static class ServiceCollectionExtensions
                     PermitLimit = 3,
                     Window = TimeSpan.FromMinutes(10)
                 }));
+
+            options.AddPolicy(ApiPolicies.FeedbackRateLimit, context =>
+                RateLimitPartition.GetFixedWindowLimiter(PartitionKey(context), _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 5,
+                    Window = TimeSpan.FromHours(1)
+                }));
+
+            // Rejections use the same problem-details shape as every other error and tell the
+            // client how long to wait.
+            options.OnRejected = async (context, cancellationToken) =>
+            {
+                var http = context.HttpContext;
+                http.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+
+                var detail = "Too many requests. Try again later.";
+                if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+                {
+                    var seconds = (int)Math.Ceiling(retryAfter.TotalSeconds);
+                    http.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
+                    detail = $"Too many requests. Try again in {seconds} seconds.";
+                }
+
+                await http.RequestServices.GetRequiredService<IProblemDetailsService>().TryWriteAsync(
+                    new ProblemDetailsContext
+                    {
+                        HttpContext = http,
+                        ProblemDetails = new ProblemDetails
+                        {
+                            Status = StatusCodes.Status429TooManyRequests,
+                            Title = "Too Many Requests",
+                            Detail = detail
+                        }
+                    });
+            };
         });
 
         return services;
