@@ -32,7 +32,7 @@ public static class ServiceCollectionExtensions
                 npgsql.EnableRetryOnFailure(maxRetryCount: 3, maxRetryDelay: TimeSpan.FromSeconds(5), errorCodesToAdd: null);
             });
 
-            // Only log query details in Development
+            // Query parameters and detailed errors can contain user data, so they are Development only.
             var isDevelopment = serviceProvider.GetRequiredService<IHostEnvironment>().IsDevelopment();
             options.EnableSensitiveDataLogging(isDevelopment);
             options.EnableDetailedErrors(isDevelopment);
@@ -113,7 +113,7 @@ public static class ServiceCollectionExtensions
         {
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
 
-            // Partition by signed-in user, falling back to the caller's address.
+            // Partition by signed-in user, falling back to the caller address.
             static string PartitionKey(HttpContext context) =>
                 context.User.FindFirstValue("oid")
                 ?? context.Connection.RemoteIpAddress?.ToString()

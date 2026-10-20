@@ -9,7 +9,7 @@ public interface IAccountRepository
 
     /// <summary>
     /// Fetches all accounts for a user alongside their active transactions up to <paramref name="upToDate"/>.
-    /// Uses two queries rather than a JOIN to avoid row explosion on accounts with many transactions.
+    /// Uses two queries rather than a JOIN so accounts with many transactions do not multiply rows.
     /// </summary>
     Task<(IReadOnlyList<Account> Accounts, IReadOnlyList<Transaction> Transactions)>
         GetByUserIdWithTransactionsUpToDateAsync(Guid userId, DateTimeOffset upToDate);

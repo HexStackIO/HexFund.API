@@ -4,7 +4,7 @@ using Microsoft.EntityFrameworkCore;
 namespace HexFund.Infrastructure.Data;
 
 /// <summary>
-/// Database context for the Finance Planner application
+/// EF Core context for HexFund. Reads are untracked by default (see AddDatabase); writers opt in.
 /// </summary>
 public class HexFundDbContext : DbContext
 {

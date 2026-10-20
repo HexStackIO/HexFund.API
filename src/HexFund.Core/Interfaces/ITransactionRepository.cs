@@ -14,7 +14,7 @@ public interface ITransactionRepository
 
     /// <summary>
     /// Deletes the transaction. If it is an amendment successor, its predecessor is
-    /// restored to open-ended in the same save, so the operation is atomic.
+    /// given back its end date in the same save, so the operation is atomic.
     /// </summary>
     Task<bool> DeleteAsync(Guid transactionId);
 
