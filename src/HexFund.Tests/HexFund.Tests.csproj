@@ -4,6 +4,24 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
+		<IsPackable>false</IsPackable>
 	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+		<PackageReference Include="xunit" Version="2.9.*" />
+		<PackageReference Include="xunit.runner.visualstudio" Version="2.8.*" />
+		<PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="8.0.*" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\HexFund.Core\HexFund.Core.csproj" />
+		<ProjectReference Include="..\HexFund.Application\HexFund.Application.csproj" />
+		<ProjectReference Include="..\HexFund.Infrastructure\HexFund.Infrastructure.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Using Include="Xunit" />
+	</ItemGroup>
 
 </Project>

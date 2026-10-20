@@ -10,43 +10,44 @@ public class TransactionService : ITransactionService
 {
     private readonly ITransactionRepository _transactionRepository;
     private readonly IAccountRepository _accountRepository;
+    private readonly ICacheService _cache;
 
     public TransactionService(
         ITransactionRepository transactionRepository,
-        IAccountRepository accountRepository)
+        IAccountRepository accountRepository,
+        ICacheService cache)
     {
         _transactionRepository = transactionRepository;
         _accountRepository = accountRepository;
+        _cache = cache;
     }
 
-    public async Task<IEnumerable<TransactionDto>> GetAccountTransactionsAsync(
+    public async Task<IReadOnlyList<TransactionDto>?> GetAccountTransactionsAsync(
         Guid accountId, Guid userId, bool includeHistory = false)
     {
         if (!await _accountRepository.UserOwnsAccountAsync(userId, accountId))
-            return Enumerable.Empty<TransactionDto>();
+            return null;
 
         var transactions = await _transactionRepository.GetByAccountIdAsync(accountId);
 
         if (!includeHistory)
         {
-            var now = DateTimeOffset.UtcNow;
-            transactions = transactions.Where(t =>
-                t.PredecessorTransactionId == null || !t.EndDate.HasValue || t.EndDate >= now);
+            // A transaction that has been amended is superseded by its successor.
+            var superseded = transactions
+                .Where(t => t.PredecessorTransactionId.HasValue)
+                .Select(t => t.PredecessorTransactionId!.Value)
+                .ToHashSet();
+
+            transactions = transactions.Where(t => !superseded.Contains(t.TransactionId)).ToList();
         }
 
-        return transactions.Select(MapToDto);
+        return transactions.Select(MapToDto).ToList();
     }
 
     public async Task<TransactionDto?> GetTransactionByIdAsync(Guid transactionId, Guid userId)
     {
-        var transaction = await _transactionRepository.GetByIdAsync(transactionId);
-        if (transaction == null)
-            return null;
-
-        if (!await _accountRepository.UserOwnsAccountAsync(userId, transaction.AccountId))
-            return null;
-
-        return MapToDto(transaction);
+        var transaction = await _transactionRepository.GetByIdForUserAsync(transactionId, userId);
+        return transaction == null ? null : MapToDto(transaction);
     }
 
     public async Task<TransactionDto?> CreateTransactionAsync(
@@ -62,7 +63,7 @@ public class TransactionService : ITransactionService
             Description = request.Description,
             Amount = request.Amount,
             Category = request.Category,
-            Frequency = (FrequencyType)request.Frequency,
+            Frequency = request.Frequency,
             StartDate = request.StartDate,
             EndDate = request.EndDate,
             IsActive = true,
@@ -70,80 +71,67 @@ public class TransactionService : ITransactionService
         };
 
         await _transactionRepository.CreateAsync(transaction);
+        _cache.InvalidateAccount(accountId);
         return MapToDto(transaction);
     }
 
     public async Task<TransactionDto?> UpdateTransactionAsync(
-        Guid transactionId, UpdateTransactionRequest request, Guid userId)
+        Guid accountId, Guid transactionId, UpdateTransactionRequest request, Guid userId)
     {
-        var transaction = await _transactionRepository.GetByIdAsync(transactionId);
+        var transaction = await GetOwnedAsync(accountId, transactionId, userId);
         if (transaction == null)
-            return null;
-
-        if (!await _accountRepository.UserOwnsAccountAsync(userId, transaction.AccountId))
             return null;
 
         transaction.Description = request.Description;
         transaction.Amount = request.Amount;
         transaction.Category = request.Category;
-        transaction.Frequency = (FrequencyType)request.Frequency;
+        transaction.Frequency = request.Frequency;
         transaction.StartDate = request.StartDate;
         transaction.EndDate = request.EndDate;
         transaction.IsActive = request.IsActive;
         transaction.Color = request.Color;
 
         await _transactionRepository.UpdateAsync(transaction);
+        _cache.InvalidateAccount(accountId);
         return MapToDto(transaction);
     }
 
-    public async Task<bool> DeleteTransactionAsync(Guid transactionId, Guid userId)
+    public async Task<bool> DeleteTransactionAsync(Guid accountId, Guid transactionId, Guid userId)
     {
-        var transaction = await _transactionRepository.GetByIdAsync(transactionId);
-        if (transaction == null)
+        if (await GetOwnedAsync(accountId, transactionId, userId) == null)
             return false;
 
-        if (!await _accountRepository.UserOwnsAccountAsync(userId, transaction.AccountId))
-            return false;
-
-        // If this is an amend successor, restore the predecessor to open-ended.
-        if (transaction.PredecessorTransactionId.HasValue)
-        {
-            var predecessor = await _transactionRepository.GetByIdAsync(
-                transaction.PredecessorTransactionId.Value);
-            if (predecessor != null)
-            {
-                predecessor.EndDate = null;
-                await _transactionRepository.UpdateAsync(predecessor);
-            }
-        }
-
-        return await _transactionRepository.DeleteAsync(transactionId);
+        // The repository restores the predecessor atomically when deleting an amendment successor.
+        var deleted = await _transactionRepository.DeleteAsync(transactionId);
+        if (deleted)
+            _cache.InvalidateAccount(accountId);
+        return deleted;
     }
 
     /// <summary>
-    /// Amend a recurring transaction with new values starting on request.EffectiveDate.
-    ///
-    /// Steps:
-    ///   1. Validate ownership and that EffectiveDate is strictly after the original StartDate.
-    ///   2. End-date the original transaction to EffectiveDate − 1 day.
-    ///   3. Create a successor row inheriting all fields, with the caller's overrides applied,
-    ///      StartDate = EffectiveDate, and PredecessorTransactionId pointing to the original.
+    /// Applies new values to a recurring transaction from request.EffectiveDate forward:
+    /// the original is end-dated to EffectiveDate - 1 day and a successor row inheriting
+    /// its fields (with the request's overrides) starts on EffectiveDate. Both rows are
+    /// saved atomically.
     /// </summary>
     public async Task<TransactionDto?> AmendTransactionAsync(
-        Guid transactionId, AmendTransactionRequest request, Guid userId)
+        Guid accountId, Guid transactionId, AmendTransactionRequest request, Guid userId)
     {
-        var original = await _transactionRepository.GetByIdAsync(transactionId);
+        var original = await GetOwnedAsync(accountId, transactionId, userId);
         if (original == null)
             return null;
 
-        if (!await _accountRepository.UserOwnsAccountAsync(userId, original.AccountId))
-            return null;
+        if (original.Frequency == FrequencyType.Once)
+            throw new ArgumentException("Only recurring transactions can be amended.");
 
         if (request.EffectiveDate <= original.StartDate)
-            return null;
+            throw new ArgumentException("Effective date must be after the transaction's start date.");
 
-        original.EndDate = request.EffectiveDate.AddDays(-1);
-        await _transactionRepository.UpdateAsync(original);
+        if (original.EndDate.HasValue && request.EffectiveDate > original.EndDate.Value)
+            throw new ArgumentException("Effective date must be before the transaction's end date.");
+
+        if (await _transactionRepository.HasSuccessorAsync(transactionId))
+            throw new ArgumentException("This transaction has already been amended; amend its latest version instead.");
 
         var successor = new Transaction
         {
@@ -154,14 +142,24 @@ public class TransactionService : ITransactionService
             Category = request.Category ?? original.Category,
             Frequency = original.Frequency,
             StartDate = request.EffectiveDate,
-            EndDate = null,
+            EndDate = original.EndDate,
             IsActive = true,
             Color = request.Color ?? original.Color,
-            PredecessorTransactionId = original.TransactionId,
+            PredecessorTransactionId = original.TransactionId
         };
 
-        await _transactionRepository.CreateAsync(successor);
+        original.EndDate = request.EffectiveDate.AddDays(-1);
+
+        await _transactionRepository.AmendAsync(original, successor);
+        _cache.InvalidateAccount(accountId);
         return MapToDto(successor);
+    }
+
+    /// <summary>Loads the transaction if it exists, belongs to the user, and belongs to the route's account.</summary>
+    private async Task<Transaction?> GetOwnedAsync(Guid accountId, Guid transactionId, Guid userId)
+    {
+        var transaction = await _transactionRepository.GetByIdForUserAsync(transactionId, userId);
+        return transaction?.AccountId == accountId ? transaction : null;
     }
 
     private static TransactionDto MapToDto(Transaction t) => new()
@@ -175,6 +173,6 @@ public class TransactionService : ITransactionService
         EndDate = t.EndDate,
         IsActive = t.IsActive,
         Color = t.Color,
-        PredecessorTransactionId = t.PredecessorTransactionId,
+        PredecessorTransactionId = t.PredecessorTransactionId
     };
 }

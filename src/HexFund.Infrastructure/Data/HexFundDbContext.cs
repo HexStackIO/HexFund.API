@@ -18,44 +18,33 @@ public class HexFundDbContext : DbContext
     public DbSet<Transaction> Transactions => Set<Transaction>();
     public DbSet<UserCategory> UserCategories => Set<UserCategory>();
 
+    protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+    {
+        configurationBuilder.Properties<DateTimeOffset>().HaveConversion<UtcDateTimeOffsetConverter>();
+        configurationBuilder.Properties<DateTimeOffset?>().HaveConversion<UtcDateTimeOffsetConverter>();
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        var converter = new UtcDateTimeOffsetOffsetConverter();
-
-        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
-        {
-            foreach (var property in entityType.GetProperties())
-            {
-                if (property.ClrType == typeof(DateTimeOffset))
-                    property.SetValueConverter(converter);
-
-                if (property.ClrType == typeof(DateTimeOffset?))
-                    property.SetValueConverter(converter);
-            }
-        }
-
         base.OnModelCreating(modelBuilder);
 
-        // User configuration
         modelBuilder.Entity<User>(entity =>
         {
             entity.HasKey(e => e.UserId);
-            entity.HasIndex(e => e.Email).IsUnique();
+            entity.HasIndex(e => e.Email);
+            entity.HasIndex(e => e.EntraObjectId).IsUnique();
             entity.Property(e => e.Email).HasMaxLength(255).IsRequired();
-            entity.Property(e => e.PasswordHash).HasMaxLength(255).IsRequired();
             entity.Property(e => e.FirstName).HasMaxLength(100);
             entity.Property(e => e.LastName).HasMaxLength(100);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
             entity.Property(u => u.HasCustomName).HasDefaultValue(false);
         });
 
-        // Account configuration
         modelBuilder.Entity<Account>(entity =>
         {
             entity.HasKey(e => e.AccountId);
             entity.Property(e => e.AccountName).HasMaxLength(100).IsRequired();
             entity.Property(e => e.InitialBalance).HasPrecision(18, 2);
-            entity.Property(e => e.CurrentBalance).HasPrecision(18, 2);
             entity.Property(e => e.Currency).HasMaxLength(3).HasDefaultValue("USD");
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
@@ -66,7 +55,6 @@ public class HexFundDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
-        // Transaction configuration
         modelBuilder.Entity<Transaction>(entity =>
         {
             entity.HasKey(e => e.TransactionId);
@@ -78,6 +66,9 @@ public class HexFundDbContext : DbContext
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.Color).HasMaxLength(7).IsRequired(false);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+            // Every balance/calendar query filters on account + start date.
+            entity.HasIndex(e => new { e.AccountId, e.StartDate });
 
             entity.HasOne<Transaction>()
                 .WithMany()
@@ -91,14 +82,10 @@ public class HexFundDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
-        // UserCategory configuration
         modelBuilder.Entity<UserCategory>(entity =>
         {
             entity.HasKey(c => c.CategoryId);
-
-            entity.Property(c => c.Name)
-                  .IsRequired()
-                  .HasMaxLength(100);
+            entity.Property(c => c.Name).IsRequired().HasMaxLength(100);
 
             entity.HasIndex(c => new { c.UserId, c.Name })
                   .IsUnique()
@@ -109,5 +96,37 @@ public class HexFundDbContext : DbContext
                   .HasForeignKey(c => c.UserId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
+    }
+
+    public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        StampAuditColumns();
+        return base.SaveChangesAsync(cancellationToken);
+    }
+
+    public override int SaveChanges()
+    {
+        StampAuditColumns();
+        return base.SaveChanges();
+    }
+
+    /// <summary>Single place that sets CreatedAt / ModifiedAt so repositories need not.</summary>
+    private void StampAuditColumns()
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        foreach (var entry in ChangeTracker.Entries())
+        {
+            if (entry.State == EntityState.Added && entry.Metadata.FindProperty("CreatedAt") != null)
+            {
+                var created = entry.Property("CreatedAt");
+                if (created.CurrentValue is DateTimeOffset c && c == default)
+                    created.CurrentValue = now;
+            }
+            else if (entry.State == EntityState.Modified && entry.Metadata.FindProperty("ModifiedAt") != null)
+            {
+                entry.Property("ModifiedAt").CurrentValue = now;
+            }
+        }
     }
 }

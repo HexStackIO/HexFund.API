@@ -1,4 +1,4 @@
-﻿using HexFund.Core.Entities;
+using HexFund.Core.Entities;
 
 namespace HexFund.Core.Interfaces;
 
@@ -7,15 +7,14 @@ namespace HexFund.Core.Interfaces;
 /// </summary>
 public interface ICategoryRepository
 {
-    /// <summary>Returns all categories belonging to the specified user.</summary>
-    Task<IEnumerable<UserCategory>> GetByUserIdAsync(Guid userId);
+    Task<IReadOnlyList<UserCategory>> GetByUserIdAsync(Guid userId);
 
-    /// <summary>Returns a single category by its primary key, or null if not found.</summary>
-    Task<UserCategory?> GetByIdAsync(Guid categoryId);
+    /// <summary>Case-insensitive name check scoped to the user.</summary>
+    Task<bool> ExistsAsync(Guid userId, string name);
 
-    /// <summary>Persists a new category record.</summary>
-    Task CreateAsync(UserCategory category);
+    /// <summary>Persists the category. Returns false if the unique (user, name) index rejected it.</summary>
+    Task<bool> TryCreateAsync(UserCategory category);
 
-    /// <summary>Removes a category by primary key.</summary>
-    Task DeleteAsync(Guid categoryId);
+    /// <summary>Deletes a category owned by the user. Returns false if not found.</summary>
+    Task<bool> DeleteForUserAsync(Guid userId, Guid categoryId);
 }

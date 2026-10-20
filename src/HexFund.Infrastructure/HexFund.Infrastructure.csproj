@@ -13,16 +13,14 @@
 
 	<ItemGroup>
 		<PackageReference Include="Azure.Identity" Version="1.11.4" />
-		<PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.*" />
-		<PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.*">
+		<PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.32" />
+		<PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.32">
 			<PrivateAssets>all</PrivateAssets>
 			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
 		</PackageReference>
+		<PackageReference Include="Microsoft.Extensions.Caching.Abstractions" Version="8.0.0" />
 		<PackageReference Include="Microsoft.Graph" Version="5.104.0" />
-		<PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.*" />
-
-		<!-- Caching for performance optimization -->
-		<PackageReference Include="Microsoft.Extensions.Caching.Abstractions" Version="8.0.*" />
+		<PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.11" />
 	</ItemGroup>
 
 </Project>

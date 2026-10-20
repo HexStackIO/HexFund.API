@@ -5,9 +5,6 @@ using Microsoft.EntityFrameworkCore;
 
 namespace HexFund.Infrastructure.Repositories;
 
-/// <summary>
-/// Repository for Transaction entity operations
-/// </summary>
 public class TransactionRepository : ITransactionRepository
 {
     private readonly HexFundDbContext _context;
@@ -17,24 +14,18 @@ public class TransactionRepository : ITransactionRepository
         _context = context;
     }
 
-    public async Task<Transaction?> GetByIdAsync(Guid transactionId)
-    {
-        return await _context.Transactions
-            .Include(t => t.Account)
-            .FirstOrDefaultAsync(t => t.TransactionId == transactionId);
-    }
+    public async Task<Transaction?> GetByIdForUserAsync(Guid transactionId, Guid userId) =>
+        await _context.Transactions
+            .FirstOrDefaultAsync(t => t.TransactionId == transactionId && t.Account.UserId == userId);
 
-    public async Task<IEnumerable<Transaction>> GetByAccountIdAsync(Guid accountId)
-    {
-        return await _context.Transactions
+    public async Task<IReadOnlyList<Transaction>> GetByAccountIdAsync(Guid accountId) =>
+        await _context.Transactions
             .Where(t => t.AccountId == accountId)
             .OrderByDescending(t => t.StartDate)
             .ToListAsync();
-    }
 
     public async Task<Transaction> CreateAsync(Transaction transaction)
     {
-        transaction.CreatedAt = DateTime.UtcNow;
         _context.Transactions.Add(transaction);
         await _context.SaveChangesAsync();
         return transaction;
@@ -42,7 +33,6 @@ public class TransactionRepository : ITransactionRepository
 
     public async Task<Transaction> UpdateAsync(Transaction transaction)
     {
-        transaction.ModifiedAt = DateTime.UtcNow;
         _context.Transactions.Update(transaction);
         await _context.SaveChangesAsync();
         return transaction;
@@ -50,51 +40,57 @@ public class TransactionRepository : ITransactionRepository
 
     public async Task<bool> DeleteAsync(Guid transactionId)
     {
-        var transaction = await _context.Transactions.FindAsync(transactionId);
+        var transaction = await _context.Transactions
+            .AsTracking()
+            .FirstOrDefaultAsync(t => t.TransactionId == transactionId);
         if (transaction == null)
             return false;
+
+        // Deleting an amendment successor restores its predecessor (the successor inherited
+        // the original end date, so handing it back is exact), in the same save.
+        if (transaction.PredecessorTransactionId is { } predecessorId)
+        {
+            var predecessor = await _context.Transactions
+                .AsTracking()
+                .FirstOrDefaultAsync(t => t.TransactionId == predecessorId);
+            if (predecessor != null)
+                predecessor.EndDate = transaction.EndDate;
+        }
 
         _context.Transactions.Remove(transaction);
         await _context.SaveChangesAsync();
         return true;
     }
 
-    /// <summary>
-    /// Get transactions for an account that overlap with a date range.
-    /// This properly handles recurring transactions by checking if:
-    /// 1. The transaction starts on or before the end of the range
-    /// 2. The transaction has no end date (ongoing) OR ends on or after the start of the range
-    /// 
-    /// Example: A monthly transaction starting 2/6/26 with no end date will match:
-    /// - February 2026 query (starts 2/6, no end)
-    /// - March 2026 query (started before 3/31, no end)
-    /// - All future months (no end date means it continues)
-    /// </summary>
-    public async Task<IEnumerable<Transaction>> GetByAccountAndDateRangeAsync(
-        Guid accountId,
-        DateTimeOffset startDate,
-        DateTimeOffset endDate)
+    public Task<bool> HasSuccessorAsync(Guid transactionId) =>
+        _context.Transactions.AnyAsync(t => t.PredecessorTransactionId == transactionId);
+
+    public async Task AmendAsync(Transaction original, Transaction successor)
     {
-        return await _context.Transactions
-            .Where(t => t.AccountId == accountId
-                && t.IsActive                                         // Inactive transactions excluded from calendar
-                && t.StartDate <= endDate                             // Transaction starts on or before end of range
-                && (!t.EndDate.HasValue || t.EndDate >= startDate))  // No end date OR ends on or after start of range
-            .OrderBy(t => t.StartDate)
-            .ThenBy(t => t.CreatedAt)
-            .ToListAsync();
+        _context.Transactions.Update(original);
+        _context.Transactions.Add(successor);
+        await _context.SaveChangesAsync();
     }
 
-    public async Task<IEnumerable<Transaction>> GetByAccountUpToDateAsync(
-        Guid accountId,
-        DateTimeOffset upToDate)
-    {
-        return await _context.Transactions
+    /// <summary>
+    /// Transactions that overlap a date range: they start on or before the end of the
+    /// range and are either open-ended or end on/after the start of the range.
+    /// Inactive transactions are excluded.
+    /// </summary>
+    public async Task<IReadOnlyList<Transaction>> GetByAccountAndDateRangeAsync(
+        Guid accountId, DateTimeOffset startDate, DateTimeOffset endDate) =>
+        await _context.Transactions
             .Where(t => t.AccountId == accountId
-                && t.IsActive                  // Inactive transactions excluded from balance calculations
-                && t.StartDate <= upToDate)
-            .OrderBy(t => t.StartDate)
-            .ThenBy(t => t.CreatedAt)
+                && t.IsActive
+                && t.StartDate <= endDate
+                && (!t.EndDate.HasValue || t.EndDate >= startDate))
             .ToListAsync();
-    }
+
+    public async Task<IReadOnlyList<Transaction>> GetByAccountUpToDateAsync(
+        Guid accountId, DateTimeOffset upToDate) =>
+        await _context.Transactions
+            .Where(t => t.AccountId == accountId
+                && t.IsActive
+                && t.StartDate <= upToDate)
+            .ToListAsync();
 }

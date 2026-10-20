@@ -65,12 +65,12 @@ jobs:
       - name: Restore NuGet packages
         run: dotnet restore
 
-      - name: Install EF Core tools
-        run: dotnet tool install --global dotnet-ef
+      - name: Restore EF Core tool (version pinned in .config/dotnet-tools.json)
+        run: dotnet tool restore
 
       - name: Run migrations
         run: |
-          dotnet ef database update \
+          dotnet tool run dotnet-ef database update \
             --project ${{ env.INFRA_PROJECT_PATH }} \
             --startup-project ${{ env.PROJECT_PATH }} \
             --connection "${{ secrets.AZURE_POSTGRESQL_CONNECTION_STRING }}"

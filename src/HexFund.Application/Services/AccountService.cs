@@ -1,3 +1,4 @@
+using HexFund.Application.Calculation;
 using HexFund.Application.DTOs;
 using HexFund.Application.Interfaces;
 using HexFund.Core.Entities;
@@ -8,45 +9,36 @@ namespace HexFund.Application.Services;
 public class AccountService : IAccountService
 {
     private readonly IAccountRepository _accountRepository;
-    private readonly ICashFlowService _cashFlowService;
+    private readonly ITransactionRepository _transactionRepository;
+    private readonly ICacheService _cache;
 
-    public AccountService(IAccountRepository accountRepository, ICashFlowService cashFlowService)
+    public AccountService(
+        IAccountRepository accountRepository,
+        ITransactionRepository transactionRepository,
+        ICacheService cache)
     {
         _accountRepository = accountRepository;
-        _cashFlowService = cashFlowService;
+        _transactionRepository = transactionRepository;
+        _cache = cache;
     }
 
-    public async Task<IEnumerable<AccountDto>> GetUserAccountsAsync(Guid userId)
+    public async Task<IReadOnlyList<AccountDto>> GetUserAccountsAsync(Guid userId)
     {
-        var asOfDate = DateTimeOffset.UtcNow;
+        var asOf = DateTimeOffset.UtcNow;
         var (accounts, transactions) =
-            await _accountRepository.GetByUserIdWithTransactionsUpToDateAsync(userId, asOfDate);
+            await _accountRepository.GetByUserIdWithTransactionsUpToDateAsync(userId, asOf);
 
-        var txByAccount = transactions
-            .GroupBy(t => t.AccountId)
-            .ToDictionary(g => g.Key, g => (IEnumerable<Transaction>)g);
+        var byAccount = transactions.ToLookup(t => t.AccountId);
 
-        return accounts.Select(account =>
-        {
-            txByAccount.TryGetValue(account.AccountId, out var accountTx);
-            var balance = _cashFlowService.CalculateBalanceFromTransactions(
-                accountTx ?? Enumerable.Empty<Transaction>(),
-                account.InitialBalance,
-                asOfDate);
-            return MapToDto(account, balance);
-        }).ToList();
+        return accounts
+            .Select(a => MapToDto(a, BalanceCalculator.BalanceAt(a.InitialBalance, byAccount[a.AccountId], asOf)))
+            .ToList();
     }
 
     public async Task<AccountDto?> GetAccountByIdAsync(Guid accountId, Guid userId)
     {
-        if (!await _accountRepository.UserOwnsAccountAsync(userId, accountId))
-            return null;
-
-        var account = await _accountRepository.GetByIdAsync(accountId);
-        if (account == null)
-            return null;
-
-        return await MapToDtoWithCurrentBalanceAsync(account, userId);
+        var account = await _accountRepository.GetByIdForUserAsync(userId, accountId);
+        return account == null ? null : await MapWithCurrentBalanceAsync(account);
     }
 
     public async Task<AccountDto> CreateAccountAsync(CreateAccountRequest request, Guid userId)
@@ -62,39 +54,35 @@ public class AccountService : IAccountService
         };
 
         await _accountRepository.CreateAsync(account);
-        return MapToDto(account, request.InitialBalance);
+        return MapToDto(account, account.InitialBalance);
     }
 
     public async Task<AccountDto?> UpdateAccountAsync(Guid accountId, UpdateAccountRequest request, Guid userId)
     {
-        if (!await _accountRepository.UserOwnsAccountAsync(userId, accountId))
-            return null;
-
-        var account = await _accountRepository.GetByIdAsync(accountId);
+        var account = await _accountRepository.GetByIdForUserAsync(userId, accountId);
         if (account == null)
             return null;
 
         account.AccountName = request.AccountName;
         account.IsActive = request.IsActive;
-
         await _accountRepository.UpdateAsync(account);
-        return await MapToDtoWithCurrentBalanceAsync(account, userId);
+
+        return await MapWithCurrentBalanceAsync(account);
     }
 
     public async Task<bool> DeleteAccountAsync(Guid accountId, Guid userId)
     {
-        if (!await _accountRepository.UserOwnsAccountAsync(userId, accountId))
-            return false;
-
-        return await _accountRepository.DeleteAsync(accountId);
+        var deleted = await _accountRepository.DeleteForUserAsync(userId, accountId);
+        if (deleted)
+            _cache.InvalidateAccount(accountId);
+        return deleted;
     }
 
-    private async Task<AccountDto> MapToDtoWithCurrentBalanceAsync(Account account, Guid userId)
+    private async Task<AccountDto> MapWithCurrentBalanceAsync(Account account)
     {
-        var currentBalance = await _cashFlowService.GetBalanceAtDateAsync(
-            account.AccountId, userId, DateTimeOffset.UtcNow);
-
-        return MapToDto(account, currentBalance ?? account.InitialBalance);
+        var asOf = DateTimeOffset.UtcNow;
+        var transactions = await _transactionRepository.GetByAccountUpToDateAsync(account.AccountId, asOf);
+        return MapToDto(account, BalanceCalculator.BalanceAt(account.InitialBalance, transactions, asOf));
     }
 
     private static AccountDto MapToDto(Account account, decimal currentBalance) => new()

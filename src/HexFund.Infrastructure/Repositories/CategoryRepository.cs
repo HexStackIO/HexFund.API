@@ -1,7 +1,8 @@
-﻿using HexFund.Core.Entities;
+using HexFund.Core.Entities;
 using HexFund.Core.Interfaces;
 using HexFund.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace HexFund.Infrastructure.Repositories;
 
@@ -14,32 +15,34 @@ public class CategoryRepository : ICategoryRepository
         _context = context;
     }
 
-    public async Task<IEnumerable<UserCategory>> GetByUserIdAsync(Guid userId) =>
+    public async Task<IReadOnlyList<UserCategory>> GetByUserIdAsync(Guid userId) =>
         await _context.UserCategories
             .Where(c => c.UserId == userId)
-            .AsNoTracking()
             .ToListAsync();
 
-    public async Task<UserCategory?> GetByIdAsync(Guid categoryId) =>
-        await _context.UserCategories
-            .AsNoTracking()
-            .FirstOrDefaultAsync(c => c.CategoryId == categoryId);
+    public Task<bool> ExistsAsync(Guid userId, string name)
+    {
+        var lowered = name.ToLower();
+        return _context.UserCategories.AnyAsync(c => c.UserId == userId && c.Name.ToLower() == lowered);
+    }
 
-    public async Task CreateAsync(UserCategory category)
+    public async Task<bool> TryCreateAsync(UserCategory category)
     {
         _context.UserCategories.Add(category);
-        await _context.SaveChangesAsync();
-    }
-
-    public async Task DeleteAsync(Guid categoryId)
-    {
-        var category = await _context.UserCategories
-            .FirstOrDefaultAsync(c => c.CategoryId == categoryId);
-
-        if (category != null)
+        try
         {
-            _context.UserCategories.Remove(category);
             await _context.SaveChangesAsync();
+            return true;
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
+        {
+            _context.Entry(category).State = EntityState.Detached;
+            return false;
         }
     }
+
+    public async Task<bool> DeleteForUserAsync(Guid userId, Guid categoryId) =>
+        await _context.UserCategories
+            .Where(c => c.CategoryId == categoryId && c.UserId == userId)
+            .ExecuteDeleteAsync() > 0;
 }

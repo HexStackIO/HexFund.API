@@ -1,4 +1,4 @@
-﻿using HexFund.Application.DTOs;
+using HexFund.Application.DTOs;
 using HexFund.Application.Interfaces;
 using HexFund.Core.Entities;
 using HexFund.Core.Interfaces;
@@ -14,50 +14,38 @@ public class CategoryService : ICategoryService
         _categoryRepository = categoryRepository;
     }
 
-    public async Task<IEnumerable<UserCategoryDto>> GetUserCategoriesAsync(Guid userId)
+    public async Task<IReadOnlyList<UserCategoryDto>> GetUserCategoriesAsync(Guid userId)
     {
         var categories = await _categoryRepository.GetByUserIdAsync(userId);
         return categories
             .OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
-            .Select(MapToDto);
+            .Select(MapToDto)
+            .ToList();
     }
 
-    public async Task<UserCategoryDto?> CreateCategoryAsync(
-        CreateCategoryRequest request, Guid userId)
+    public async Task<UserCategoryDto?> CreateCategoryAsync(CreateCategoryRequest request, Guid userId)
     {
-        var trimmedName = request.Name.Trim();
-
-        // Enforce uniqueness per user (case-insensitive)
-        var existing = await _categoryRepository.GetByUserIdAsync(userId);
-        if (existing.Any(c => string.Equals(c.Name, trimmedName, StringComparison.OrdinalIgnoreCase)))
+        if (await _categoryRepository.ExistsAsync(userId, request.Name))
             return null;
 
         var category = new UserCategory
         {
             CategoryId = Guid.NewGuid(),
             UserId = userId,
-            Name = trimmedName,
-            CreatedAt = DateTimeOffset.UtcNow,
+            Name = request.Name
         };
 
-        await _categoryRepository.CreateAsync(category);
-        return MapToDto(category);
+        // The unique index is the backstop if two requests race past the check above.
+        return await _categoryRepository.TryCreateAsync(category) ? MapToDto(category) : null;
     }
 
-    public async Task<bool> DeleteCategoryAsync(Guid categoryId, Guid userId)
-    {
-        var category = await _categoryRepository.GetByIdAsync(categoryId);
-        if (category == null || category.UserId != userId)
-            return false;
-
-        await _categoryRepository.DeleteAsync(categoryId);
-        return true;
-    }
+    public Task<bool> DeleteCategoryAsync(Guid categoryId, Guid userId) =>
+        _categoryRepository.DeleteForUserAsync(userId, categoryId);
 
     private static UserCategoryDto MapToDto(UserCategory c) => new()
     {
         CategoryId = c.CategoryId,
         Name = c.Name,
-        CreatedAt = c.CreatedAt,
+        CreatedAt = c.CreatedAt
     };
 }

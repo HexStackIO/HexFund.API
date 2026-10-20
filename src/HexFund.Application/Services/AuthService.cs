@@ -17,24 +17,10 @@ public class AuthService : IAuthService
         IEntraUserService entraUserService,
         ILogger<AuthService> logger)
     {
-        _userRepository   = userRepository;
+        _userRepository = userRepository;
         _entraUserService = entraUserService;
-        _logger           = logger;
+        _logger = logger;
     }
-
-    /// <summary>
-    /// No longer used — login is handled by Entra External ID via MSAL.
-    /// Kept to satisfy interface until legacy endpoints are fully removed.
-    /// </summary>
-    public Task<AuthResponse?> LoginAsync(LoginRequest request)
-        => Task.FromResult<AuthResponse?>(null);
-
-    /// <summary>
-    /// No longer used — registration is handled by Entra External ID via MSAL.
-    /// Kept to satisfy interface until legacy endpoints are fully removed.
-    /// </summary>
-    public Task<AuthResponse?> RegisterAsync(RegisterRequest request)
-        => Task.FromResult<AuthResponse?>(null);
 
     public async Task<UserDto?> GetCurrentUserAsync(Guid userId)
     {
@@ -42,42 +28,43 @@ public class AuthService : IAuthService
         return user == null ? null : MapToUserDto(user);
     }
 
-    public async Task<UserDto?> SyncEntraUserAsync(
+    /// <summary>
+    /// The Entra object id is the identity: it is also used as the local UserId, which is
+    /// what lets every controller derive the user straight from the token. Users are never
+    /// matched by email, because the email claim is not guaranteed to be verified.
+    /// </summary>
+    public async Task<UserDto> SyncEntraUserAsync(
         string objectId, string? email, string? firstName, string? lastName)
     {
-        var user = await _userRepository.GetByEntraIdAsync(objectId);
+        if (!Guid.TryParse(objectId, out var userId))
+            throw new ArgumentException("Entra object id is not a valid GUID.", nameof(objectId));
 
-        if (user == null && !string.IsNullOrEmpty(email))
-            user = await _userRepository.GetByEmailAsync(email);
+        var user = await _userRepository.GetByEntraIdAsync(objectId);
 
         if (user == null)
         {
             user = new User
             {
-                UserId = Guid.Parse(objectId),
+                UserId = userId,
                 EntraObjectId = objectId,
                 Email = email ?? string.Empty,
                 FirstName = firstName ?? string.Empty,
                 LastName = lastName ?? string.Empty,
-                PasswordHash = string.Empty,
-                CreatedAt = DateTimeOffset.UtcNow,
                 LastLoginAt = DateTimeOffset.UtcNow
             };
             await _userRepository.CreateAsync(user);
         }
         else
         {
-            if (string.IsNullOrEmpty(user.EntraObjectId))
-                user.EntraObjectId = objectId;
-
-            // Only overwrite name from Entra if the user hasn't customised it locally.
-            // Once a user edits their name via UpdateProfileAsync the Entra claim is
-            // no longer considered authoritative for display purposes.
+            // Entra names only overwrite the stored name until the user edits it locally.
             if (!user.HasCustomName)
             {
                 user.FirstName = firstName ?? user.FirstName;
                 user.LastName = lastName ?? user.LastName;
             }
+
+            if (!string.IsNullOrEmpty(email))
+                user.Email = email;
 
             user.LastLoginAt = DateTimeOffset.UtcNow;
             await _userRepository.UpdateAsync(user);
@@ -89,31 +76,25 @@ public class AuthService : IAuthService
     public async Task<UserDto?> UpdateProfileAsync(Guid userId, UpdateProfileRequest request)
     {
         var user = await _userRepository.GetByIdAsync(userId);
-        if (user == null) return null;
+        if (user == null)
+            return null;
 
-        user.FirstName = request.FirstName.Trim();
-        user.LastName = request.LastName.Trim();
-        user.HasCustomName = true; // prevents sync from overwriting this on next login
+        user.FirstName = request.FirstName;
+        user.LastName = request.LastName;
+        user.HasCustomName = true; // stops sign-in sync from overwriting this
         await _userRepository.UpdateAsync(user);
 
         return MapToUserDto(user);
     }
 
     /// <summary>
-    /// Permanently deletes the user's local database records AND their
-    /// Entra External ID account. Order is deliberate:
-    ///
-    ///   1. Delete Entra account first — if this fails we abort before touching
-    ///      the database, so the user can retry. Their data is still intact.
-    ///   2. Delete local DB records — ExecuteDeleteAsync cascades atomically
-    ///      through Accounts → Transactions and User → UserCategories.
-    ///
-    /// A 404 from Entra (account already gone) is treated as non-fatal so a
-    /// partially-deleted state from a previous attempt can still be cleaned up.
+    /// Deletes the Entra account first. If that fails unexpectedly we abort before touching
+    /// the database so the user can retry with their data intact. A 404 from Entra is
+    /// non-fatal (handled in <see cref="IEntraUserService"/>), so a half-finished earlier
+    /// attempt can still be completed.
     /// </summary>
     public async Task<bool> DeleteUserAsync(Guid userId)
     {
-        // Fetch the Entra object ID before we delete the DB row.
         var user = await _userRepository.GetByIdAsync(userId);
         if (user == null)
         {
@@ -121,7 +102,6 @@ public class AuthService : IAuthService
             return false;
         }
 
-        // Step 1 — Entra deletion (fail fast if unexpected error)
         if (!string.IsNullOrEmpty(user.EntraObjectId))
         {
             try
@@ -130,8 +110,6 @@ public class AuthService : IAuthService
             }
             catch (Exception ex)
             {
-                // Unexpected Graph API error (permissions, service outage, etc.)
-                // Abort without touching the DB so the user can retry.
                 _logger.LogError(ex,
                     "Failed to delete Entra user {EntraObjectId} for {UserId}. DB records preserved.",
                     user.EntraObjectId, userId);
@@ -140,11 +118,9 @@ public class AuthService : IAuthService
         }
         else
         {
-            _logger.LogWarning(
-                "User {UserId} has no EntraObjectId — skipping Entra deletion.", userId);
+            _logger.LogWarning("User {UserId} has no EntraObjectId, skipping Entra deletion.", userId);
         }
 
-        // Step 2 — Database deletion (single-statement cascade)
         return await _userRepository.DeleteAsync(userId);
     }
 
@@ -154,6 +130,6 @@ public class AuthService : IAuthService
         Email = user.Email,
         FirstName = user.FirstName,
         LastName = user.LastName,
-        CreatedAt = user.CreatedAt,
+        CreatedAt = user.CreatedAt
     };
 }

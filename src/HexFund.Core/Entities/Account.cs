@@ -1,7 +1,9 @@
 namespace HexFund.Core.Entities;
 
 /// <summary>
-/// Represents a financial account (checking, savings, etc.)
+/// Represents a financial account (checking, savings, etc.).
+/// The current balance is always derived from InitialBalance plus transactions;
+/// it is intentionally not stored.
 /// </summary>
 public class Account
 {
@@ -9,7 +11,6 @@ public class Account
     public Guid UserId { get; set; }
     public string AccountName { get; set; } = string.Empty;
     public decimal InitialBalance { get; set; }
-    public decimal CurrentBalance { get; set; }
     public string Currency { get; set; } = "USD";
     public bool IsActive { get; set; } = true;
     public DateTimeOffset CreatedAt { get; set; }

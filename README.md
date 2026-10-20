@@ -105,7 +105,7 @@ dotnet ef migrations add <MigrationName> --project HexFund.API
 dotnet ef database update <MigrationName> --project HexFund.API
 ```
 
-Migrations are applied automatically on startup if the database is reachable. This can be disabled for environments where you prefer manual migration control.
+In Development the app applies pending migrations on startup. In production the deploy pipeline applies them (the `migrate` job, using the `dotnet-ef` version pinned in `.config/dotnet-tools.json`) before the new build is deployed; the app never migrates itself.
 
 ---
 
@@ -126,16 +126,17 @@ Logs are written to both the console and `logs/hexfund-<date>.log`, retained for
 
 ## API Overview
 
-All endpoints except `/api/auth/register` and `/api/auth/login` require a `Bearer` JWT token.
+Every endpoint except `/api/health` requires an Entra External ID `Bearer` token (enforced by a fallback authorization policy, so new controllers are protected by default). Set `AzureAd:RequiredScope` to also require a specific `scp` scope. Errors are returned as RFC 7807 problem details; invalid input is a `400` validation problem. Requests are rate limited per user (stricter on account deletion).
 
 ### Authentication — `/api/auth`
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/register` | Create a new user account |
-| `POST` | `/login` | Authenticate and receive a JWT |
-| `POST` | `/logout` | Signal the client to discard its token |
+| `POST` | `/sync` | Create or refresh the local user after Entra sign-in |
+| `POST` | `/logout` | Server-side hook for sign-out (the client clears its token cache) |
 | `GET` | `/me` | Get the currently authenticated user |
+| `PUT` | `/profile` | Update display name |
+| `DELETE` | `/user` | Permanently delete the Entra identity and all data |
 
 ### Accounts — `/api/accounts`
 
@@ -166,16 +167,12 @@ All endpoints except `/api/auth/register` and `/api/auth/login` require a `Beare
 |--------|----------|-------------|
 | `GET` | `/cashflow` | Projection with daily snapshots for a date range |
 | `GET` | `/monthly-overview` | Income, expense totals, and category breakdown for a month |
-| `GET` | `/daily-balance` | Balance on a specific date |
-| `GET` | `/rolling-balance` | Daily balance snapshots for a date range |
-| `GET` | `/balance-at-date` | Balance as of a specific point in time |
-| `GET` | `/transactions/with-balances` | Transactions with their running balances |
 
 ### Health — `/api/health`
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/` | Health check for container/load-balancer probes |
+| `GET` | `/` | Anonymous probe; reports database connectivity (`503` when down) |
 
 ---
 
@@ -185,16 +182,16 @@ All endpoints except `/api/auth/register` and `/api/auth/login` require a `Beare
 HexFund.API/
 ├── Controllers/          # HTTP endpoints
 ├── Extensions/           # IServiceCollection extension methods (DI registration)
-├── Middleware/           # Global exception handler, request logging
+├── Middleware/           # ApiExceptionHandler (problem details)
 ├── Migrations/           # EF Core migrations
 └── Program.cs            # App bootstrap
 
 HexFund.Application/
 ├── DTOs/                 # Request/response models
+├── Calculation/          # Pure recurrence + balance maths (no I/O)
 ├── Interfaces/           # Service and cache interfaces
-├── Models/               # Configuration models (e.g. JwtSettings)
 ├── Services/             # Business logic (Auth, Account, Transaction, CashFlow)
-└── Validation/           # Custom validation attributes
+└── Validation/           # Input normalisation and date-range validation
 
 HexFund.Core/
 ├── Entities/             # Account, Transaction, User
@@ -211,12 +208,14 @@ HexFund.Infrastructure/
 
 ## Key Design Decisions
 
-**Transaction amendment** — Rather than editing a recurring transaction in-place (which would silently alter its history), the `Amend` endpoint end-dates the original row and creates a successor with `PredecessorTransactionId` set. The UI can use this to show or hide the history chain. Deleting a successor restores the predecessor to open-ended.
+**Transaction amendment** — Rather than editing a recurring transaction in-place (which would silently alter its history), the `Amend` endpoint end-dates the original row and creates a successor with `PredecessorTransactionId` set, in one atomic save. A transaction can only be amended once (amend its latest version instead), and one-time transactions cannot be amended. Deleting a successor restores its predecessor atomically. Superseded rows are hidden from the default list.
 
-**Recurrence expansion** — Recurring transactions are stored as templates (a single DB row with a `FrequencyType`). `TransactionRecurrenceService` expands them into virtual occurrences at query time — nothing extra is persisted. This keeps storage lean and makes it straightforward to change a transaction's future behavior via an amendment.
+**Recurrence expansion** — Recurring transactions are stored as templates (a single DB row with a `FrequencyType`). `RecurrenceCalculator` expands them into occurrences at query time, jumping straight to the requested window, so nothing extra is persisted. Occurrences keep the template time of day, monthly series clamp to the last day of short months, and every series includes its own start date.
 
 **Balance calculation** — Balances are calculated on the fly from `InitialBalance` + all transaction occurrences up to a given date. There is no stored `CurrentBalance` that can drift out of sync.
 
-**Caching** — Frequently read data (accounts, transactions, monthly overviews) is held in `IMemoryCache` with per-category TTLs. The cache is invalidated explicitly on any mutation, so reads are always consistent after a write.
+**Caching** — Calendar reads (monthly overview, per-day and per-month occurrences) are cached in `IMemoryCache` inside `CashFlowService`, under keys that include the user id. Any transaction or account write evicts everything tagged with that account (`ICacheService.InvalidateAccount`), so reads are consistent after a write. Account balances are not cached.
+
+**Identity** — The Entra object id is the local `UserId`, so controllers derive the user straight from the token. `POST /api/auth/sync` creates the user on first sign-in. Users are never matched by email.
 
 **Two-query account load** — `GetByUserIdWithTransactionsUpToDateAsync` fetches accounts and their transactions in two separate queries rather than a JOIN, avoiding the Cartesian row explosion that occurs when accounts have many transactions.
