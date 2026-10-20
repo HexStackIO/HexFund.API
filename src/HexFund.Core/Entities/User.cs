@@ -28,4 +28,5 @@ public class User
 
     public ICollection<Account> Accounts { get; set; } = new List<Account>();
     public ICollection<UserCategory> Categories { get; set; } = new List<UserCategory>();
+    public ICollection<Feedback> Feedback { get; set; } = new List<Feedback>();
 }

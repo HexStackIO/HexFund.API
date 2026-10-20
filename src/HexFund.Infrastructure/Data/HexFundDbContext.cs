@@ -17,6 +17,7 @@ public class HexFundDbContext : DbContext
     public DbSet<Account> Accounts => Set<Account>();
     public DbSet<Transaction> Transactions => Set<Transaction>();
     public DbSet<UserCategory> UserCategories => Set<UserCategory>();
+    public DbSet<Feedback> Feedback => Set<Feedback>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
@@ -94,6 +95,25 @@ public class HexFundDbContext : DbContext
             entity.HasOne(c => c.User)
                   .WithMany(u => u.Categories)
                   .HasForeignKey(c => c.UserId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<Feedback>(entity =>
+        {
+            entity.ToTable("Feedback");
+            entity.HasKey(f => f.Id);
+            entity.Property(f => f.Body).IsRequired().HasMaxLength(4000);
+            entity.Property(f => f.DiagnosticsJson).HasColumnType("jsonb");
+            entity.Property(f => f.LastError).HasMaxLength(500);
+            entity.Property(f => f.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+            // The dispatcher polls for due pending rows.
+            entity.HasIndex(f => new { f.OutboxStatus, f.NextAttemptAt });
+
+            // Deleting a user removes their feedback rows; issues already created are not touched.
+            entity.HasOne(f => f.User)
+                  .WithMany(u => u.Feedback)
+                  .HasForeignKey(f => f.UserId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
     }
