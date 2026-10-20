@@ -10,13 +10,30 @@ public class FeedbackServiceTests
 {
     private readonly FakeFeedbackRepository _feedback = new();
     private readonly FakeUserRepository _users = new();
+    private readonly FakeDispatchSignal _signal;
     private readonly FeedbackService _service;
     private readonly User _user = new() { UserId = Guid.NewGuid(), Email = "a@example.com" };
 
     public FeedbackServiceTests()
     {
+        _signal = new FakeDispatchSignal(() => _feedback.Rows.Count);
         _users.Users.Add(_user);
-        _service = new FeedbackService(_feedback, _users);
+        _service = new FeedbackService(_feedback, _users, _signal);
+    }
+
+    [Fact]
+    public async Task Submit_WakesTheDispatcher_OnlyAfterTheReportIsStored()
+    {
+        await _service.SubmitAsync(_user.UserId, Request());
+        Assert.Equal(1, _signal.Notifications);
+        Assert.Equal(1, _signal.RowsWhenNotified);
+    }
+
+    [Fact]
+    public async Task Submit_ForAnUnsyncedUser_DoesNotWakeTheDispatcher()
+    {
+        await _service.SubmitAsync(Guid.NewGuid(), Request());
+        Assert.Equal(0, _signal.Notifications);
     }
 
     private static SubmitFeedbackRequest Request(FeedbackDiagnosticsDto? diagnostics = null) => new()

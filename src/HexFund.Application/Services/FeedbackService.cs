@@ -18,11 +18,16 @@ public class FeedbackService : IFeedbackService
 
     private readonly IFeedbackRepository _feedbackRepository;
     private readonly IUserRepository _userRepository;
+    private readonly IFeedbackDispatchSignal _dispatchSignal;
 
-    public FeedbackService(IFeedbackRepository feedbackRepository, IUserRepository userRepository)
+    public FeedbackService(
+        IFeedbackRepository feedbackRepository,
+        IUserRepository userRepository,
+        IFeedbackDispatchSignal dispatchSignal)
     {
         _feedbackRepository = feedbackRepository;
         _userRepository = userRepository;
+        _dispatchSignal = dispatchSignal;
     }
 
     public async Task<FeedbackReceiptDto?> SubmitAsync(Guid userId, SubmitFeedbackRequest request)
@@ -45,6 +50,10 @@ public class FeedbackService : IFeedbackService
         };
 
         await _feedbackRepository.AddAsync(feedback);
+
+        // Wake the dispatcher so the report goes out now rather than at the next poll.
+        _dispatchSignal.Notify();
+
         return new FeedbackReceiptDto { Id = feedback.Id };
     }
 
