@@ -15,7 +15,7 @@ pasted into a conversation as background for product, marketing or engineering d
 | **Status** | Closed beta. Not yet in general production use. |
 | **Stack** | .NET 10, ASP.NET Core controllers, EF Core 8, PostgreSQL, Microsoft Entra External ID |
 | **Hosting** | Azure App Service, deployed from GitHub Actions |
-| **Tests** | 46 xUnit tests (`dotnet test`) |
+| **Tests** | 158 xUnit tests (`dotnet test`) |
 
 ## Contents
 
@@ -64,13 +64,14 @@ accumulating them against an account balance.
 | **Categories** | A per-user list that works across all of the user's accounts. |
 | **Colours** | Optional colour per transaction for the calendar. |
 | **Profile and sign-in** | Sign-in is handled by Microsoft Entra External ID. The user can edit their display name. |
+| **In-app feedback** | Users send a bug, idea or question (with optional device diagnostics). It is stored immediately and forwarded in the background as a private issue for triage, without any user identifier. |
 | **Account deletion** | One call removes the user's sign-in identity and all of their data. This is what app-store policies require. |
 
 ### What the user would notice (selling points grounded in the implementation)
 
 - Forward-looking by design: balances and "days below zero" are first-class results, not an afterthought.
 - History-preserving edits: amending a recurring item never rewrites the past.
-- Privacy-minded data model: the backend stores a name, an email address, and the user's own financial entries. Passwords are never stored (sign-in is delegated to Entra), and a full deletion endpoint exists.
+- Privacy-minded data model: the backend stores a name, an email address, the user's own financial entries, and any feedback they choose to send. Passwords are never stored (sign-in is delegated to Entra), feedback issues carry no user identifier, and a full deletion endpoint exists.
 - Fast to read: calendar and overview responses are cached per user and refreshed automatically after any change.
 
 ### Audience and positioning
@@ -183,6 +184,31 @@ that into a 400.
 - **`CacheService`** wraps `IMemoryCache` and tags entries by account. Each account owns a cancellation token; cancelling it expires every entry for that account at once. It is registered as a singleton.
 - **`ApiExceptionHandler`** converts exceptions to RFC 7807 problem details (400 for `ArgumentException`, 401 for missing identity, 500 with a generic message otherwise).
 - **`HexFundDbContext`** applies UTC conversion to all timestamps and stamps `CreatedAt` / `ModifiedAt` in one place.
+- **Feedback pipeline** (see the next section): `FeedbackService` stores a report and wakes `FeedbackDispatcherHost`, a background service that runs `FeedbackDispatchProcessor` to create issues through `IIssueTracker` (`GitHubIssueTracker`, or `NoOpIssueTracker` when GitHub is disabled). `IssueDraftBuilder` is the pure class that builds the issue text, and `FeedbackRetentionProcessor` removes old delivered reports.
+
+### Feedback pipeline
+
+The API is the only component that talks to GitHub; the mobile app never holds a GitHub credential.
+
+```
+App --POST /api/feedback--> API --stores a Pending row--> PostgreSQL (the outbox)
+                                          |
+                          FeedbackDispatcherHost (background)
+                                          |  GitHub App installation token
+                                          v
+                  private repo (issue labelled needs-triage, source-app, bug|feature|question)
+```
+
+1. **Submit.** `POST /api/feedback` validates and normalises the report and saves it with status `Pending`. It returns `202 Accepted` right away; creating the issue is never done inline. Saving the row also wakes the dispatcher.
+2. **Deliver.** The dispatcher claims due rows in batches of 10 with one atomic `UPDATE ... FOR UPDATE SKIP LOCKED` that also reserves each row for a 5 minute lease. It builds the issue with `IssueDraftBuilder`, creates it, and marks the row `Sent` with the issue number. When it runs: once at startup, whenever a report is submitted, and every 15 seconds while the app is awake.
+3. **Retry.** Failures are retried after 1 minute, 5 minutes, 30 minutes, 2 hours, then every 6 hours, each spread by up to 20% either way. A longer `Retry-After` from GitHub wins. After 8 attempts, or on an error that can never succeed (for example a rejected payload), the row becomes `Failed` and is logged at Error. Before any retry the dispatcher looks for an issue carrying the report's marker, so an issue that was created but not acknowledged (timeout, crash) is adopted rather than duplicated.
+4. **Retain.** Once a day, `Sent` rows older than `Feedback:RetentionMonths` (default 12) are deleted. `Pending` and `Failed` rows are never deleted by age. Deleting a row does not delete its issue.
+
+**What goes into an issue.** A title like `[Bug] first line of the report` (at most 70 characters, with `@` and `#` neutralised so it cannot mention anyone or link to another issue); the labels `needs-triage`, `source-app` and the type label (`bug`, `feature` or `question`); and a body with a hidden `<!-- hexfund-feedback:<id> -->` marker, the submission time, the report text inside a code fence longer than any backtick run in the text, then the diagnostics and a table of recent API errors (every value rendered as an escaped code span). It never contains the user id, email, name, IP address, account names or amounts. The feedback id is the only link back to a person, and it exists only in the database.
+
+**GitHub App.** The API authenticates as a GitHub App: it signs a short-lived RS256 JWT with the app private key, exchanges it for an installation token, and caches that token until about 5 minutes before it expires. The key, JWT and token are never logged. With `GitHub:Enabled=false` (local development, tests) a no-op tracker marks reports sent with a fake issue number, so nothing needs GitHub credentials.
+
+**Free-tier behavior.** The app runs on the Azure App Service free tier, which has no Always On, so the process is unloaded when idle and the dispatcher only runs while the app is awake. A report submitted while GitHub is down stays `Pending` in the database and is delivered the next time the app starts or receives a request. Submitting is never blocked by GitHub being unavailable.
 
 ### Caching
 
@@ -260,6 +286,48 @@ category, frequency and colour, so a client can open the source transaction from
 | POST | `/` | Create. 409 if the name already exists. |
 | DELETE | `/{id}` | Delete. Transactions keep their category text. |
 
+### Feedback: `/api/feedback`
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/` | Submit a bug, idea or question. Limited to 5 per hour per user and 64 KB per request. Returns `202 Accepted` with `{ "id": "<guid>" }`. |
+
+Request body:
+
+```json
+{
+  "type": 0,
+  "body": "Calendar shows the rent on the wrong day...",
+  "diagnostics": {
+    "appVersion": "1.9", "buildNumber": "23", "platform": "Android", "osVersion": "16",
+    "deviceModel": "Google Pixel 8", "screen": "calendar", "theme": "Gold",
+    "recentErrors": [
+      { "at": "2026-10-20T14:01:22Z", "method": "GET", "path": "accounts/{id}/monthly-overview",
+        "status": 500, "error": null, "correlationId": "b1c7..." }
+    ]
+  }
+}
+```
+
+| Field | Rule |
+|---|---|
+| `type` | Required. `0` Bug, `1` Idea, `2` Question. Values are never renumbered. |
+| `body` | Required, 10 to 4000 characters. Newlines and tabs are kept; other control characters are removed; CRLF becomes LF. |
+| `diagnostics` | Optional. Send null or omit it when the user switched diagnostics off. Limits: `appVersion`, `buildNumber`, `platform` 20; `osVersion`, `theme` 30; `deviceModel` 80; `screen` 50. |
+| `diagnostics.recentErrors` | At most 20 entries (more is a 400). `method` 10, `path` 200, `error` 100, `correlationId` 64, `status` 0 to 599. The server cuts `path` at the first `?` and replaces GUID segments with `{id}`, and drops entries whose `at` is not a valid date. |
+
+Responses: `202` accepted; `400` validation problem; `401`; `404` if the user has not called
+`POST /api/auth/sync` yet; `413` over the size limit; `429` with a `Retry-After` header in seconds.
+A `202` means the report is stored, not that the issue exists yet.
+
+### Correlation ids
+
+Every response carries an `X-Correlation-Id` header. A client may send its own on a request
+(8 to 64 letters, digits or hyphens; anything else is replaced with a generated GUID), and may send
+`X-App-Version` (up to 20 characters, sanitised). Both appear on every log line for the request, and
+error responses repeat the id in a `correlationId` field of the problem details. Quote the id when
+reporting a problem.
+
 ### Health: `/api/health`
 
 Anonymous. Returns 200 with `status`, `database`, `timestamp`, `version`, or 503 when the database
@@ -269,8 +337,9 @@ cannot be reached.
 
 Errors are RFC 7807 problem details. Invalid input is a 400 `ValidationProblemDetails` with an
 `errors` object keyed by field. Other statuses: 401 (no or bad token, or missing identity claim),
-404 (not found or not owned by the caller), 409 (duplicate category), 429 (rate limit), 503 (health
-check only), 500 (generic message; details are logged).
+404 (not found or not owned by the caller), 409 (duplicate category), 413 (request body too large),
+429 (rate limit, with `Retry-After`), 503 (health check only), 500 (generic message; details are
+logged). Every problem-details body includes a `correlationId`.
 
 ---
 
@@ -281,7 +350,10 @@ PostgreSQL, managed by EF Core migrations. All timestamps are `timestamptz` in U
 ```
 User 1 ---- * Account 1 ---- * Transaction
  |                               ^
- +---- * UserCategory            +-- PredecessorTransactionId (self reference, nullable)
+ |                               +-- PredecessorTransactionId (self reference, nullable)
+ +---- * UserCategory
+ |
+ +---- * Feedback (outbox rows; one per submitted report)
 ```
 
 | Table | Key columns | Notes |
@@ -290,9 +362,10 @@ User 1 ---- * Account 1 ---- * Transaction
 | `Accounts` | `AccountId`, `UserId`, `AccountName`, `InitialBalance`, `Currency`, `IsActive`, `CreatedAt`, `ModifiedAt` | Cascade delete from the user. |
 | `Transactions` | `TransactionId`, `AccountId`, `Description`, `Amount`, `Category`, `Frequency`, `StartDate`, `EndDate`, `IsActive`, `Color`, `PredecessorTransactionId`, `CreatedAt`, `ModifiedAt` | Cascade from the account. Self reference is `SET NULL`. Index on `(AccountId, StartDate)`. |
 | `UserCategories` | `CategoryId`, `UserId`, `Name`, `CreatedAt` | Unique on `(UserId, Name)`. |
+| `Feedback` | `Id`, `UserId`, `Type` (0 Bug, 1 Idea, 2 Question), `Body`, `DiagnosticsJson` (`jsonb`, nullable), `OutboxStatus` (0 Pending, 1 Sent, 2 Failed), `Attempts`, `NextAttemptAt`, `LastError`, `GitHubIssueNumber`, `CreatedAt`, `ModifiedAt` | Cascade delete from the user. Index on `(OutboxStatus, NextAttemptAt)` for the dispatcher. While a row is claimed, `NextAttemptAt` holds the lease expiry. |
 
-Deleting a user is a single `DELETE` and the database cascades through accounts, transactions and
-categories in dependency order.
+Deleting a user is a single `DELETE` and the database cascades through accounts, transactions,
+categories and feedback rows in dependency order.
 
 Migrations live in `src/HexFund.Infrastructure/Migrations` (the DbContext's assembly).
 
@@ -317,7 +390,7 @@ resulting JWT (`Microsoft.Identity.Web`, authority built from `AzureAd:Instance`
 | Authenticated by default | A fallback authorization policy requires a signed-in user on every endpoint; only `/api/health` opts out. |
 | Optional scope check | Set `AzureAd:RequiredScope` to also require that value in the token's `scp` claim. Empty means off. |
 | Ownership checks | Every query that takes an id also filters by the caller's user id (accounts, transactions, categories, cached data). |
-| Rate limiting | 300 requests per minute per user (IP address if unauthenticated); 3 deletions per 10 minutes. Counters are per server instance. |
+| Rate limiting | 300 requests per minute per user (IP address if unauthenticated); 3 account deletions per 10 minutes; 5 feedback reports per hour. Rejections are 429 problem details with `Retry-After`. Counters are per server instance. |
 | Input handling | Strict validation; EF Core parameterised queries. |
 | CORS | Development allows any origin. Production allows only `AllowedOrigins`. No credentialed CORS (tokens travel in the `Authorization` header). |
 | Errors | Internal details are logged, not returned. |
@@ -347,6 +420,12 @@ locally, and environment variables in Azure (use `__` for nesting, for example `
 | `AzureAd:RequiredScope` | Optional delegated scope to require. Empty disables the check. |
 | `AllowedOrigins` | Array of allowed browser origins in production. |
 | `Serilog:MinimumLevel` | Log levels. EF command logging is set to Warning by default. |
+| `GitHub__Enabled` | `true` to create real issues. When false a no-op tracker is used and no other `GitHub__*` setting is needed. When true, startup fails if any of the next four is missing or malformed. |
+| `GitHub__AppId` | The GitHub App id (or client id), used as the JWT issuer. |
+| `GitHub__InstallationId` | The id of the app installation on the tracker repository. |
+| `GitHub__PrivateKeyBase64` | The app private key PEM, base64-encoded so it fits in an environment variable. Secret. |
+| `GitHub__TrackerRepo` | The private repository that receives issues, as `owner/name`. |
+| `Feedback__RetentionMonths` | How long delivered reports are kept. Default 12, allowed 1 to 60. |
 
 ---
 
@@ -412,7 +491,7 @@ HexFund.API/
 dotnet test
 ```
 
-46 unit tests, no database or network required:
+158 unit tests, no database or network required:
 
 | Area | What is covered |
 |---|---|
@@ -421,10 +500,16 @@ dotnet test
 | Transactions | Atomic amend, rejected amends, history filtering, ownership, route/account mismatch, cache invalidation on every write. |
 | Cash flow | Monthly overview figures, grouping by day, no cross-user cache hits. |
 | Cache | Hits, null results, per-account eviction, invalidation racing a build. |
-| Validation | Normalisation, amounts, colours, currencies, date ranges. |
+| Validation | Normalisation, amounts, colours, currencies, date ranges, feedback limits and path cleaning. |
+| Correlation ids | Valid, malformed and missing ids; version sanitising; the header and problem-details field on error responses; the 413 mapping. |
+| Feedback | Storing pending rows, waking the dispatcher, diagnostics serialisation, issue titles/bodies (fencing, escaping, no identifiers). |
+| Delivery | Claim and drain, retry schedule and jitter, the attempt cap, permanent failures, `Retry-After`, adopting an already created issue, retention. |
+| GitHub client | App JWT shape and signature, token caching, create and find calls, error classification, rate-limit headers, option validation. |
+| Rate limiting | The 5-per-hour feedback policy, per-user counting, 429 with `Retry-After`. |
 
-Not covered yet: controller and HTTP behaviour, repository queries against a real PostgreSQL, the
-Graph client, and migrations. See enhancement ideas.
+Not covered yet: repository queries against a real PostgreSQL (including the atomic claim and the
+user-delete cascade), the Graph client, migrations, and requests through real Kestrel (for example
+the 64 KB body limit). See enhancement ideas.
 
 ---
 
@@ -445,7 +530,33 @@ that is still running.
 
 - Logs go to the console (Azure log stream) and `logs/hexfund-<date>.log`, kept for 30 days.
 - `GET /api/health` is suitable for uptime probes and reports database connectivity.
-- Each request logs method, path, status and duration.
+- Each request logs method, path, status, duration, the correlation id and the client app version.
+- Feedback report text is never logged at Information or above; only ids, statuses and attempt counts are.
+- The dispatcher logs a warning when the oldest pending report has been waiting more than an hour, and an error when a report is marked `Failed`. Check the log stream after changing GitHub settings.
+
+### Operations note: feedback follow-up
+
+Triage happens on the issues in the private tracker repository, which hold no personal data. To
+contact the person behind an issue (for follow-up only), take the id from the issue's hidden marker
+line, `<!-- hexfund-feedback:<id> -->`, and look it up in the database:
+
+```sql
+SELECT f."Id", f."Type", f."CreatedAt", u."Email", u."FirstName"
+FROM "Feedback" f
+JOIN "Users" u ON u."UserId" = f."UserId"
+WHERE f."Id" = '<id>';
+```
+
+If the user has deleted their account the row is gone and the issue is de-identified text that can
+no longer be linked to anyone. Issues are not deleted with the account (see limitations). When a
+user asks for their reports to be removed, a maintainer redacts and closes the matching issues by
+hand. While the account still exists, list its report ids with
+`SELECT "Id" FROM "Feedback" WHERE "UserId" = '<user id>'` and search the tracker repository for each
+marker. After the account is gone the only way to find an issue is the text the person describes.
+
+To see reports that need attention: `SELECT "Id", "Attempts", "LastError", "NextAttemptAt" FROM "Feedback" WHERE "OutboxStatus" = 2;`
+(status 2 is `Failed`). To retry one after fixing the cause, set `OutboxStatus` back to 0 and
+`NextAttemptAt` to now.
 
 ---
 
@@ -462,6 +573,11 @@ that is still running.
 | Single `DELETE` for user and account removal | PostgreSQL resolves the self-referencing foreign key and cascades in the right order. |
 | Migrations applied by the pipeline, not at startup | Failed migrations stop the deploy instead of leaving a half-started app. |
 | Normalise input rather than scrub it | HTML or SQL "cleaning" corrupts legitimate text and adds no protection here. |
+| Feedback goes through a database outbox | The user gets a fast answer and the report survives a GitHub outage or an app restart. The row is the single source of truth until the issue exists. |
+| The API alone talks to GitHub, as a GitHub App | The mobile app never holds a credential. An app installation token is short-lived and scoped to one repository, unlike a personal access token. |
+| Plain `HttpClient` for GitHub instead of Octokit | Only three calls are needed, so a thin wrapper means no extra dependency and is easy to test with a fake handler. |
+| Look up existing issues by listing, not searching | Search is eventually consistent and may not find an issue created seconds ago; listing reads the stored body. |
+| Issue text is built by a pure class with fenced, escaped user text | A report can never break out of its block, ping someone, or leak an identifier into the tracker. |
 
 ---
 
@@ -478,7 +594,10 @@ that is still running.
 - **Concurrent first sign-in.** Two simultaneous `sync` calls for a brand-new user could collide on the primary key.
 - **No API versioning.** Breaking changes require a coordinated client release.
 - **Entra dependency for deletion.** Account deletion needs Graph permissions and connectivity; it fails safely and can be retried.
-- **Not covered by automated tests:** HTTP layer, repositories on real PostgreSQL, migrations.
+- **Issues outlive accounts.** Deleting an account removes the user's feedback rows but not the issues already created from them. The issues carry no identifier, yet the text is free-form and could contain personal details the user typed, so a maintainer redacts and closes them by hand on request.
+- **The dispatcher only runs while the app is awake.** The free App Service tier has no Always On. Reports wait in the database and go out at the next startup or request; submitting is unaffected. The dispatcher also assumes a single instance for convenience, though the atomic claim keeps overlapping instances from sending the same report twice.
+- **Feedback is write-only for the user.** There is no endpoint to see the status of a submitted report, and no inbound link from GitHub back to the app.
+- **Not covered by automated tests:** repositories on real PostgreSQL (the atomic claim, the delete cascade), migrations, and requests through real Kestrel.
 
 ---
 
@@ -505,6 +624,9 @@ Suggestions inferred from the code and its limits. None of these exist yet.
 - API versioning and an OpenAPI contract published for the client.
 - Structured metrics and tracing (OpenTelemetry) and Application Insights dashboards.
 - Soft delete or export-before-delete for account removal.
+- A "My feedback" endpoint and status updates (for example a GitHub webhook that marks a report resolved), once there is a reason to tell users what happened to a report.
+- Attach a screenshot to a report; automatic redaction of obvious personal data in report text.
+- Run the dispatcher on a schedule (a timer-triggered job) or move to a plan with Always On if report latency while idle ever matters.
 
 ---
 
@@ -526,3 +648,10 @@ Suggestions inferred from the code and its limits. None of these exist yet.
 | **Entra External ID** | Microsoft's customer identity service used for sign-in. |
 | **Object id (oid)** | The unique id of a user in Entra, reused as the HexFund user id. |
 | **Problem details** | The standard (RFC 7807) JSON shape for errors. |
+| **Correlation id** | A per-request id (`X-Correlation-Id`) that ties a response, its error body and the server log lines together. |
+| **Feedback id** | The id of a stored report. It appears in the issue as a hidden marker and is the only link from an issue back to a person, via the database. |
+| **Outbox** | A table of work still to be delivered (here, the `Feedback` rows). The row is saved first and delivered later, so nothing is lost if the destination is down. |
+| **Dispatcher** | The background service that claims pending feedback rows and turns them into issues. |
+| **Lease** | A time-limited reservation on a claimed row so no other worker takes it; if the worker dies the lease expires and the row becomes due again. |
+| **Tracker repo** | The private GitHub repository that receives feedback issues. |
+| **GitHub App** | The GitHub integration identity the API uses to create issues, authenticated with a private key and short-lived installation tokens. |
