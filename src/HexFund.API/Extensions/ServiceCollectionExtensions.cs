@@ -57,6 +57,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ITransactionService, TransactionService>();
         services.AddScoped<ICashFlowService, CashFlowService>();
         services.AddScoped<ICategoryService, CategoryService>();
+        services.AddScoped<IFeedbackService, FeedbackService>();
         services.AddSingleton<IEntraUserService, EntraUserService>();
 
         services.AddMemoryCache(options =>

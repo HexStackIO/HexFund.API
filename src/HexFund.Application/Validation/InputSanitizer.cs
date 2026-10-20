@@ -25,6 +25,18 @@ public static class InputSanitizer
     public static string? NormalizeText(string? input) =>
         input == null ? null : ControlChars.Replace(input, string.Empty).Trim();
 
+    /// <summary>
+    /// For multi-line text such as feedback. Strips control characters other than tab and newline,
+    /// converts CRLF and lone CR to LF, and trims. Null stays null.
+    /// </summary>
+    public static string? NormalizeMultilineText(string? input) =>
+        input == null
+            ? null
+            : ControlChars.Replace(input, string.Empty)
+                .Replace("\r\n", "\n")
+                .Replace('\r', '\n')
+                .Trim();
+
     /// <summary>Like <see cref="NormalizeText"/> but maps blank input to null.</summary>
     public static string? NormalizeOptionalText(string? input)
     {
