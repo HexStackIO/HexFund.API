@@ -1,3 +1,7 @@
+using System.IO.Compression;
+using System.Security.Claims;
+using System.Threading.RateLimiting;
+using HexFund.API.Middleware;
 using HexFund.Application.Interfaces;
 using HexFund.Application.Services;
 using HexFund.Core.Interfaces;
@@ -5,35 +9,35 @@ using HexFund.Infrastructure.Caching;
 using HexFund.Infrastructure.Data;
 using HexFund.Infrastructure.Repositories;
 using HexFund.Infrastructure.Services;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
-using System.IO.Compression;
 
 namespace HexFund.API.Extensions;
 
 public static class ServiceCollectionExtensions
 {
+
     public static IServiceCollection AddDatabase(
         this IServiceCollection services, IConfiguration configuration)
     {
-        services.AddDbContext<HexFundDbContext>(options =>
+        services.AddDbContext<HexFundDbContext>((serviceProvider, options) =>
         {
-            var connectionString = configuration.GetConnectionString("DefaultConnection");
-            options.UseNpgsql(connectionString, npgsqlOptions =>
+            options.UseNpgsql(configuration.GetConnectionString("DefaultConnection"), npgsql =>
             {
-                npgsqlOptions.MaxBatchSize(100);
-                npgsqlOptions.CommandTimeout(30);
-                npgsqlOptions.EnableRetryOnFailure(
-                    maxRetryCount: 3,
-                    maxRetryDelay: TimeSpan.FromSeconds(5),
-                    errorCodesToAdd: null);
+                npgsql.MaxBatchSize(100);
+                npgsql.CommandTimeout(30);
+                npgsql.EnableRetryOnFailure(maxRetryCount: 3, maxRetryDelay: TimeSpan.FromSeconds(5), errorCodesToAdd: null);
             });
 
-            // Only log query details in Development
-            var env = services.BuildServiceProvider().GetRequiredService<IWebHostEnvironment>();
-            options.EnableSensitiveDataLogging(env.IsDevelopment());
-            options.EnableDetailedErrors(env.IsDevelopment());
+            // Query parameters and detailed errors can contain user data, so they are Development only.
+            var isDevelopment = serviceProvider.GetRequiredService<IHostEnvironment>().IsDevelopment();
+            options.EnableSensitiveDataLogging(isDevelopment);
+            options.EnableDetailedErrors(isDevelopment);
+
+            // Reads are untracked by default; writers opt in with AsTracking() or Update().
             options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
         });
 
@@ -42,21 +46,24 @@ public static class ServiceCollectionExtensions
 
     public static IServiceCollection AddApplicationServices(this IServiceCollection services)
     {
-        // Repositories
         services.AddScoped<IUserRepository, UserRepository>();
         services.AddScoped<IAccountRepository, AccountRepository>();
         services.AddScoped<ITransactionRepository, TransactionRepository>();
         services.AddScoped<ICategoryRepository, CategoryRepository>();
 
-        // Services
         services.AddScoped<IAuthService, AuthService>();
         services.AddScoped<IAccountService, AccountService>();
         services.AddScoped<ITransactionService, TransactionService>();
         services.AddScoped<ICashFlowService, CashFlowService>();
         services.AddScoped<ICategoryService, CategoryService>();
-        services.AddScoped<TransactionRecurrenceService>();
-        services.AddScoped<ICacheService, CacheService>();
-        services.AddScoped<IEntraUserService, EntraUserService>();
+        services.AddSingleton<IEntraUserService, EntraUserService>();
+
+        services.AddMemoryCache(options =>
+        {
+            options.SizeLimit = 1024;
+            options.CompactionPercentage = 0.25;
+        });
+        services.AddSingleton<ICacheService, CacheService>();
 
         return services;
     }
@@ -70,18 +77,70 @@ public static class ServiceCollectionExtensions
             options.Providers.Add<GzipCompressionProvider>();
         });
 
-        services.Configure<BrotliCompressionProviderOptions>(options =>
-            options.Level = CompressionLevel.Fastest);
+        services.Configure<BrotliCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
+        services.Configure<GzipCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
 
-        services.Configure<GzipCompressionProviderOptions>(options =>
-            options.Level = CompressionLevel.Fastest);
+        return services;
+    }
 
-        services.AddMemoryCache(options =>
+    /// <summary>
+    /// Every endpoint requires an authenticated caller unless it opts out with [AllowAnonymous],
+    /// so a new controller cannot be public by accident. Set AzureAd:RequiredScope to also
+    /// require that delegated scope (the "scp" claim) on every call.
+    /// </summary>
+    public static IServiceCollection AddApiAuthorization(
+        this IServiceCollection services, IConfiguration configuration)
+    {
+        var requiredScope = configuration["AzureAd:RequiredScope"];
+
+        services.AddAuthorization(options =>
         {
-            options.SizeLimit = 1024;
-            options.CompactionPercentage = 0.25;
+            options.FallbackPolicy = new AuthorizationPolicyBuilder()
+                .RequireAuthenticatedUser()
+                .RequireAssertion(context =>
+                    string.IsNullOrEmpty(requiredScope)
+                    || context.User.FindAll("scp")
+                        .Any(c => c.Value.Split(' ').Contains(requiredScope, StringComparer.Ordinal)))
+                .Build();
         });
 
+        return services;
+    }
+
+    public static IServiceCollection AddApiRateLimiting(this IServiceCollection services)
+    {
+        services.AddRateLimiter(options =>
+        {
+            options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+            // Partition by signed-in user, falling back to the caller address.
+            static string PartitionKey(HttpContext context) =>
+                context.User.FindFirstValue("oid")
+                ?? context.Connection.RemoteIpAddress?.ToString()
+                ?? "anonymous";
+
+            options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+                RateLimitPartition.GetFixedWindowLimiter(PartitionKey(context), _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 300,
+                    Window = TimeSpan.FromMinutes(1)
+                }));
+
+            options.AddPolicy(ApiPolicies.AccountDeletionRateLimit, context =>
+                RateLimitPartition.GetFixedWindowLimiter(PartitionKey(context), _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 3,
+                    Window = TimeSpan.FromMinutes(10)
+                }));
+        });
+
+        return services;
+    }
+
+    public static IServiceCollection AddExceptionHandling(this IServiceCollection services)
+    {
+        services.AddProblemDetails();
+        services.AddExceptionHandler<ApiExceptionHandler>();
         return services;
     }
 
@@ -103,11 +162,10 @@ public static class ServiceCollectionExtensions
 
             c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
             {
-                Description = "JWT Authorization header. Enter 'Bearer' [space] and then your token.",
-                Name = "Authorization",
-                In = ParameterLocation.Header,
-                Type = SecuritySchemeType.ApiKey,
-                Scheme = "Bearer"
+                Description = "JWT access token from Entra External ID.",
+                Type = SecuritySchemeType.Http,
+                Scheme = "bearer",
+                BearerFormat = "JWT"
             });
 
             c.AddSecurityRequirement(new OpenApiSecurityRequirement
@@ -115,11 +173,7 @@ public static class ServiceCollectionExtensions
                 {
                     new OpenApiSecurityScheme
                     {
-                        Reference = new OpenApiReference
-                        {
-                            Type = ReferenceType.SecurityScheme,
-                            Id = "Bearer"
-                        }
+                        Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "Bearer" }
                     },
                     Array.Empty<string>()
                 }
@@ -134,23 +188,17 @@ public static class ServiceCollectionExtensions
     {
         services.AddCors(options =>
         {
-            options.AddPolicy("AllowAll", policy =>
+            options.AddPolicy(ApiPolicies.Cors, policy =>
             {
                 if (environment.IsDevelopment())
                 {
                     policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader();
+                    return;
                 }
-                else
-                {
-                    var allowedOrigins = configuration
-                        .GetSection("AllowedOrigins")
-                        .Get<string[]>() ?? Array.Empty<string>();
 
-                    policy.WithOrigins(allowedOrigins)
-                          .AllowAnyMethod()
-                          .AllowAnyHeader()
-                          .AllowCredentials();
-                }
+                // Bearer tokens travel in the Authorization header, so credentialed CORS is not needed.
+                var allowedOrigins = configuration.GetSection("AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
+                policy.WithOrigins(allowedOrigins).AllowAnyMethod().AllowAnyHeader();
             });
         });
 

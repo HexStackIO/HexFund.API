@@ -1,13 +1,13 @@
 ﻿namespace HexFund.Core.Entities;
 
 /// <summary>
-/// A user-defined label used to group transactions.
-/// Categories are scoped to a User (not a specific Account) so one list
-/// covers all of a user's accounts and enables cross-account reporting.
-///
-/// Deleting a category does NOT cascade to transactions — their Category
-/// string field is left as-is so historical data is preserved.
+/// A user-defined label for grouping transactions. Scoped to the user rather than an account,
+/// so one list serves all of the user's accounts. Names are unique per user.
 /// </summary>
+/// <remarks>
+/// Transactions store the category as plain text, so deleting a category leaves existing
+/// transactions untouched and history is preserved.
+/// </remarks>
 public class UserCategory
 {
     public Guid CategoryId { get; set; }
@@ -15,6 +15,5 @@ public class UserCategory
     public string Name { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
 
-    // Navigation
     public User User { get; set; } = null!;
 }

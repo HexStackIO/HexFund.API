@@ -17,7 +17,7 @@ namespace HexFund.Infrastructure.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "8.0.26")
+                .HasAnnotation("ProductVersion", "8.0.32")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -44,10 +44,6 @@ namespace HexFund.Infrastructure.Migrations
                         .HasMaxLength(3)
                         .HasColumnType("character varying(3)")
                         .HasDefaultValue("USD");
-
-                    b.Property<decimal>("CurrentBalance")
-                        .HasPrecision(18, 2)
-                        .HasColumnType("numeric(18,2)");
 
                     b.Property<decimal>("InitialBalance")
                         .HasPrecision(18, 2)
@@ -124,9 +120,9 @@ namespace HexFund.Infrastructure.Migrations
 
                     b.HasKey("TransactionId");
 
-                    b.HasIndex("AccountId");
-
                     b.HasIndex("PredecessorTransactionId");
+
+                    b.HasIndex("AccountId", "StartDate");
 
                     b.ToTable("Transactions");
                 });
@@ -168,14 +164,11 @@ namespace HexFund.Infrastructure.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
-                    b.Property<string>("PasswordHash")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
                     b.HasKey("UserId");
 
-                    b.HasIndex("Email")
+                    b.HasIndex("Email");
+
+                    b.HasIndex("EntraObjectId")
                         .IsUnique();
 
                     b.ToTable("Users");

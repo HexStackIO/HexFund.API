@@ -1,26 +1,31 @@
+using System.Reflection;
+using HexFund.Infrastructure.Data;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace HexFund.API.Controllers;
 
 [ApiController]
+[AllowAnonymous]
 [Route("api/[controller]")]
 public class HealthController : ControllerBase
 {
-    private readonly ILogger<HealthController> _logger;
-
-    public HealthController(ILogger<HealthController> logger)
-    {
-        _logger = logger;
-    }
+    private static readonly string Version =
+        Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "unknown";
 
     [HttpGet]
-    public IActionResult GetHealth()
+    public async Task<IActionResult> GetHealth([FromServices] HexFundDbContext db, CancellationToken cancellationToken)
     {
-        return Ok(new
+        var databaseUp = await db.Database.CanConnectAsync(cancellationToken);
+
+        var body = new
         {
-            Status = "Healthy",
+            Status = databaseUp ? "Healthy" : "Unhealthy",
+            Database = databaseUp ? "Up" : "Down",
             Timestamp = DateTimeOffset.UtcNow,
-            Version = "1.0.0"
-        });
+            Version
+        };
+
+        return databaseUp ? Ok(body) : StatusCode(StatusCodes.Status503ServiceUnavailable, body);
     }
 }

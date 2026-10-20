@@ -1,5 +1,5 @@
-using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
+using Microsoft.AspNetCore.Mvc;
 
 namespace HexFund.API.Controllers;
 
@@ -7,29 +7,21 @@ namespace HexFund.API.Controllers;
 public abstract class ApiControllerBase : ControllerBase
 {
     /// <summary>
-    /// Returns the Entra object ID as a string — use this for Entra-specific operations
-    /// like SyncEntraUserAsync where the object ID is stored as a string.
+    /// The Entra object id from the token. A missing claim means the token is not one of ours,
+    /// so it surfaces as a 401 (UnauthorizedAccessException) rather than a 500.
     /// </summary>
-    protected string GetCurrentUserObjectId()
-    {
-        return User.FindFirst("oid")?.Value
-            ?? User.FindFirst("http://schemas.microsoft.com/identity/claims/objectidentifier")?.Value
-            ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-            ?? throw new InvalidOperationException("User ID claim not found in token.");
-    }
+    protected string CurrentObjectId =>
+        User.FindFirstValue("oid")
+        ?? User.FindFirstValue("http://schemas.microsoft.com/identity/claims/objectidentifier")
+        ?? User.FindFirstValue(ClaimTypes.NameIdentifier)
+        ?? throw new UnauthorizedAccessException("User identity claim not found in token.");
 
     /// <summary>
-    /// Returns the internal database UserId as a Guid — use this for all standard
-    /// service calls that look up users by their PostgreSQL primary key.
-    /// Requires the user to have been synced via SyncEntraUserAsync first.
+    /// The local UserId. It is the Entra object id (see AuthService.SyncEntraUserAsync), so it
+    /// is available straight from the token; the user must have called POST api/auth/sync once.
     /// </summary>
-    protected Guid GetCurrentUserId()
-    {
-        var objectId = GetCurrentUserObjectId();
-        // Entra object IDs are valid GUIDs — parse directly
-        if (Guid.TryParse(objectId, out var guid))
-            return guid;
-
-        throw new InvalidOperationException($"User object ID '{objectId}' is not a valid GUID.");
-    }
+    protected Guid CurrentUserId =>
+        Guid.TryParse(CurrentObjectId, out var id)
+            ? id
+            : throw new UnauthorizedAccessException("User identity claim is not a valid GUID.");
 }

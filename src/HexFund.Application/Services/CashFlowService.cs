@@ -1,65 +1,103 @@
+using System.Globalization;
+using HexFund.Application.Calculation;
 using HexFund.Application.DTOs;
 using HexFund.Application.Interfaces;
 using HexFund.Core.Entities;
-using HexFund.Core.Enums;
 using HexFund.Core.Interfaces;
 
 namespace HexFund.Application.Services;
 
 public class CashFlowService : ICashFlowService
 {
+    private static readonly TimeSpan MonthlyOverviewCacheDuration = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan OccurrencesCacheDuration = TimeSpan.FromMinutes(2);
+
     private readonly IAccountRepository _accountRepository;
     private readonly ITransactionRepository _transactionRepository;
-    private readonly TransactionRecurrenceService _recurrenceService;
+    private readonly ICacheService _cache;
 
     public CashFlowService(
         IAccountRepository accountRepository,
         ITransactionRepository transactionRepository,
-        TransactionRecurrenceService recurrenceService)
+        ICacheService cache)
     {
         _accountRepository = accountRepository;
         _transactionRepository = transactionRepository;
-        _recurrenceService = recurrenceService;
+        _cache = cache;
     }
 
-    public async Task<EnhancedCashFlowProjection?> GetEnhancedCashFlowProjectionAsync(
-        Guid accountId, Guid userId, DateTimeOffset startDate, DateTimeOffset endDate,
-        bool includeProjectedRecurring = true)
+    public async Task<EnhancedCashFlowProjection?> GetCashFlowProjectionAsync(
+        Guid accountId, Guid userId, DateTimeOffset startDate, DateTimeOffset endDate)
     {
-        var account = await _accountRepository.GetByIdAsync(accountId);
-        if (account == null || account.UserId != userId)
+        var account = await _accountRepository.GetByIdForUserAsync(userId, accountId);
+        if (account == null)
             return null;
 
-        var transactionsList = await BuildTransactionListForRangeAsync(
-            accountId, startDate, endDate, includeProjectedRecurring);
+        // One query serves both the opening balance and the in-range occurrences.
+        var transactions = await _transactionRepository.GetByAccountUpToDateAsync(accountId, endDate);
 
-        var startingBalance = await CalculateBalanceAtDateInternalAsync(
-            accountId,
-            startDate.AddDays(-1).AddHours(23).AddMinutes(59).AddSeconds(59),
-            account.InitialBalance);
+        var startingBalance = BalanceCalculator.BalanceAt(
+            account.InitialBalance, transactions, startDate.AddTicks(-1));
 
-        return BuildProjection(account, startDate, endDate, startingBalance, transactionsList);
+        var occurrences = RecurrenceCalculator.Expand(transactions, startDate, endDate);
+        return BuildProjection(account, startDate, endDate, startingBalance, occurrences);
     }
 
-    public async Task<EnhancedMonthlyOverview?> GetEnhancedMonthlyOverviewAsync(
+    // Cache keys include the user id so one user can never be served another user's entry.
+    public Task<EnhancedMonthlyOverview?> GetMonthlyOverviewAsync(
+        Guid accountId, Guid userId, int year, int month) =>
+        _cache.GetOrCreateAsync(
+            $"overview:{userId}:{accountId}:{year:D4}-{month:D2}",
+            () => BuildMonthlyOverviewAsync(accountId, userId, year, month),
+            MonthlyOverviewCacheDuration,
+            accountId);
+
+    public Task<List<TransactionOccurrence>?> GetTransactionsForDateAsync(
+        Guid accountId, Guid userId, DateOnly date) =>
+        _cache.GetOrCreateAsync(
+            $"day:{userId}:{accountId}:{date:yyyy-MM-dd}",
+            async () =>
+            {
+                if (await _accountRepository.GetByIdForUserAsync(userId, accountId) == null)
+                    return null;
+
+                var start = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+                var occurrences = await LoadOccurrencesAsync(accountId, start, start.AddDays(1).AddTicks(-1));
+                return occurrences.Select(ToOccurrenceDto).ToList();
+            },
+            OccurrencesCacheDuration,
+            accountId);
+
+    public Task<Dictionary<string, List<TransactionOccurrence>>?> GetTransactionsForMonthAsync(
+        Guid accountId, Guid userId, int year, int month) =>
+        _cache.GetOrCreateAsync(
+            $"month:{userId}:{accountId}:{year:D4}-{month:D2}",
+            async () =>
+            {
+                if (await _accountRepository.GetByIdForUserAsync(userId, accountId) == null)
+                    return null;
+
+                var start = new DateTimeOffset(year, month, 1, 0, 0, 0, TimeSpan.Zero);
+                var occurrences = await LoadOccurrencesAsync(accountId, start, start.AddMonths(1).AddTicks(-1));
+
+                return occurrences
+                    .GroupBy(o => o.Date.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
+                    .ToDictionary(g => g.Key, g => g.Select(ToOccurrenceDto).ToList());
+            },
+            OccurrencesCacheDuration,
+            accountId);
+
+    private async Task<EnhancedMonthlyOverview?> BuildMonthlyOverviewAsync(
         Guid accountId, Guid userId, int year, int month)
     {
-        var startDate = new DateTimeOffset(year, month, 1, 0, 0, 0, TimeSpan.Zero);
-        var endDate = startDate.AddMonths(1).AddDays(-1).AddHours(23).AddMinutes(59).AddSeconds(59);
-
-        var projection = await GetEnhancedCashFlowProjectionAsync(
-            accountId, userId, startDate, endDate, includeProjectedRecurring: true);
+        var start = new DateTimeOffset(year, month, 1, 0, 0, 0, TimeSpan.Zero);
+        var projection = await GetCashFlowProjectionAsync(
+            accountId, userId, start, start.AddMonths(1).AddTicks(-1));
 
         if (projection == null)
             return null;
 
-        var avgDailyBalance = projection.DailySnapshots.Any()
-            ? projection.DailySnapshots.Average(s => s.EndOfDayBalance) : 0;
-        var highestBalance = projection.DailySnapshots.Any()
-            ? projection.DailySnapshots.Max(s => s.EndOfDayBalance) : projection.StartingBalance;
-        var lowestBalance = projection.DailySnapshots.Any()
-            ? projection.DailySnapshots.Min(s => s.LowestBalance) : projection.StartingBalance;
-        var daysWithNegativeBalance = projection.DailySnapshots.Count(s => s.HasNegativeBalance);
+        var days = projection.DailySnapshots;
 
         return new EnhancedMonthlyOverview
         {
@@ -71,281 +109,112 @@ public class CashFlowService : ICashFlowService
             NetChange = projection.NetChange,
             TotalIncome = projection.TotalIncome,
             TotalExpenses = projection.TotalExpenses,
-            AverageDailyBalance = avgDailyBalance,
-            HighestBalance = highestBalance,
-            LowestBalance = lowestBalance,
-            DaysWithNegativeBalance = daysWithNegativeBalance,
-            DailyBreakdown = projection.DailySnapshots,
+            AverageDailyBalance = days.Count > 0 ? days.Average(s => s.EndOfDayBalance) : 0,
+            HighestBalance = days.Count > 0 ? days.Max(s => s.EndOfDayBalance) : projection.StartingBalance,
+            LowestBalance = days.Count > 0 ? days.Min(s => s.LowestBalance) : projection.StartingBalance,
+            DaysWithNegativeBalance = days.Count(s => s.HasNegativeBalance),
+            DailyBreakdown = days,
             CategoryBreakdowns = CalculateCategoryBreakdowns(projection.Transactions)
         };
     }
 
-    public async Task<List<TransactionOccurrence>?> GetTransactionsForDateAsync(
-        Guid accountId, Guid userId, DateTimeOffset date)
+    private async Task<List<Occurrence>> LoadOccurrencesAsync(
+        Guid accountId, DateTimeOffset start, DateTimeOffset end)
     {
-        var account = await _accountRepository.GetByIdAsync(accountId);
-        if (account == null || account.UserId != userId)
-            return null;
-
-        var startOfDay = new DateTimeOffset(date.Year, date.Month, date.Day, 0, 0, 0, TimeSpan.Zero);
-        var endOfDay = startOfDay.AddDays(1).AddSeconds(-1);
-
-        var transactions = await BuildTransactionListForRangeAsync(
-            accountId, startOfDay, endOfDay, includeProjectedRecurring: true);
-
-        return transactions
-            .Select(t => new TransactionOccurrence
-            {
-                TransactionId = t.TransactionId,
-                Description = t.Description,
-                Amount = t.Amount,
-                Category = t.Category ?? string.Empty,
-                OccurrenceDate = t.StartDate.DateTime,
-                Frequency = FrequencyType.Once,
-                Color = t.Color
-            })
-            .OrderBy(t => t.OccurrenceDate)
-            .ToList();
+        var transactions = await _transactionRepository.GetByAccountAndDateRangeAsync(accountId, start, end);
+        return RecurrenceCalculator.Expand(transactions, start, end);
     }
 
-    public async Task<Dictionary<DateTime, List<TransactionOccurrence>>?> GetTransactionsForMonthAsync(
-        Guid accountId, Guid userId, int year, int month)
+    private static TransactionOccurrence ToOccurrenceDto(Occurrence o) => new()
     {
-        var account = await _accountRepository.GetByIdAsync(accountId);
-        if (account == null || account.UserId != userId)
-            return null;
+        TransactionId = o.Source.TransactionId,
+        Description = o.Source.Description,
+        Amount = o.Source.Amount,
+        Category = o.Source.Category ?? string.Empty,
+        OccurrenceDate = o.Date.UtcDateTime,
+        Frequency = o.Source.Frequency,
+        Color = o.Source.Color
+    };
 
-        var startDate = new DateTimeOffset(year, month, 1, 0, 0, 0, TimeSpan.Zero);
-        var endDate = startDate.AddMonths(1).AddSeconds(-1);
-
-        var transactions = await BuildTransactionListForRangeAsync(
-            accountId, startDate, endDate, includeProjectedRecurring: true);
-
-        return transactions
-            .GroupBy(t => t.StartDate.UtcDateTime.Date)
-            .ToDictionary(
-                g => g.Key,
-                g => g.Select(t => new TransactionOccurrence
-                {
-                    TransactionId = t.TransactionId,
-                    Description = t.Description,
-                    Amount = t.Amount,
-                    Category = t.Category ?? string.Empty,
-                    OccurrenceDate = t.StartDate.DateTime,
-                    Frequency = FrequencyType.Once,
-                    Color = t.Color
-                })
-                .OrderBy(t => t.OccurrenceDate)
-                .ToList());
-    }
-
-    public async Task<List<DailyBalanceSnapshot>?> GetRollingBalanceSnapshotsAsync(
-        Guid accountId, Guid userId, DateTimeOffset startDate, DateTimeOffset endDate)
-    {
-        var projection = await GetEnhancedCashFlowProjectionAsync(
-            accountId, userId, startDate, endDate, includeProjectedRecurring: true);
-
-        return projection?.DailySnapshots;
-    }
-
-    public async Task<decimal?> GetBalanceAtDateAsync(
-        Guid accountId, Guid userId, DateTimeOffset asOfDate)
-    {
-        var account = await _accountRepository.GetByIdAsync(accountId);
-        if (account == null || account.UserId != userId)
-            return null;
-
-        return await CalculateBalanceAtDateInternalAsync(accountId, asOfDate, account.InitialBalance);
-    }
-
-    public Task<decimal?> GetDailyBalanceAsync(Guid accountId, Guid userId, DateTimeOffset date)
-        => GetBalanceAtDateAsync(accountId, userId, date);
-
-    public async Task<List<TransactionWithBalanceDto>?> GetTransactionsWithRunningBalancesAsync(
-        Guid accountId, Guid userId, DateTimeOffset? startDate = null, DateTimeOffset? endDate = null)
-    {
-        var account = await _accountRepository.GetByIdAsync(accountId);
-        if (account == null || account.UserId != userId)
-            return null;
-
-        var start = startDate ?? new DateTimeOffset(2000, 1, 1, 0, 0, 0, TimeSpan.Zero);
-        var end = endDate ?? DateTimeOffset.MaxValue;
-
-        var projection = await GetEnhancedCashFlowProjectionAsync(
-            accountId, userId, start, end, includeProjectedRecurring: false);
-
-        return projection?.Transactions;
-    }
-
-    public decimal CalculateBalanceFromTransactions(
-        IEnumerable<Transaction> allTransactions, decimal initialBalance, DateTimeOffset asOfDate)
-    {
-        var processedTransactions = new List<Transaction>();
-
-        var (recurring, oneTime) = SplitTransactions(allTransactions);
-
-        // One-time transactions that have already occurred
-        processedTransactions.AddRange(oneTime.Where(t => t.StartDate <= asOfDate));
-
-        foreach (var template in recurring)
-        {
-            if (template.StartDate <= asOfDate)
-                processedTransactions.Add(template);
-
-            var occurrences = _recurrenceService.GenerateTransactionOccurrences(
-                template, template.StartDate, asOfDate);
-            processedTransactions.AddRange(occurrences);
-        }
-
-        return processedTransactions
-            .OrderBy(t => t.StartDate)
-            .ThenBy(t => t.CreatedAt)
-            .Aggregate(initialBalance, (bal, t) => bal + t.Amount);
-    }
-
-    private async Task<List<Transaction>> BuildTransactionListForRangeAsync(
-        Guid accountId, DateTimeOffset startDate, DateTimeOffset endDate,
-        bool includeProjectedRecurring)
-    {
-        var allTransactions = await _transactionRepository.GetByAccountAndDateRangeAsync(
-            accountId, startDate, endDate);
-
-        if (!includeProjectedRecurring)
-            return allTransactions.ToList();
-
-        var (recurring, oneTime) = SplitTransactions(allTransactions);
-
-        var result = new List<Transaction>(
-            oneTime.Where(t => t.StartDate >= startDate && t.StartDate <= endDate));
-
-        foreach (var template in recurring)
-        {
-            if (template.StartDate >= startDate && template.StartDate <= endDate)
-                result.Add(template);
-
-            result.AddRange(_recurrenceService.GenerateTransactionOccurrences(
-                template, startDate, endDate));
-        }
-
-        return result;
-    }
-
-    private async Task<decimal> CalculateBalanceAtDateInternalAsync(
-        Guid accountId, DateTimeOffset asOfDate, decimal initialBalance)
-    {
-        var allTransactions = await _transactionRepository.GetByAccountUpToDateAsync(accountId, asOfDate);
-        return CalculateBalanceFromTransactions(allTransactions, initialBalance, asOfDate);
-    }
-
-    private static (List<Transaction> Recurring, List<Transaction> OneTime) SplitTransactions(
-        IEnumerable<Transaction> transactions)
-    {
-        var recurring = new List<Transaction>();
-        var oneTime = new List<Transaction>();
-
-        foreach (var t in transactions)
-        {
-            if (t.Frequency != FrequencyType.Once)
-                recurring.Add(t);
-            else
-                oneTime.Add(t);
-        }
-
-        return (recurring, oneTime);
-    }
-
-    private EnhancedCashFlowProjection BuildProjection(
-        Core.Entities.Account account,
+    private static EnhancedCashFlowProjection BuildProjection(
+        Account account,
         DateTimeOffset startDate,
         DateTimeOffset endDate,
         decimal startingBalance,
-        List<Transaction> transactions)
+        List<Occurrence> occurrences)
     {
-        var sorted = transactions
-            .OrderBy(t => t.StartDate)
-            .ThenBy(t => t.CreatedAt)
-            .ToList();
-
         var runningBalance = startingBalance;
-        var transactionsWithBalance = new List<TransactionWithBalanceDto>(sorted.Count);
-        var dailySnapshots = new Dictionary<DateTime, DailyBalanceSnapshot>();
+        var transactions = new List<TransactionWithBalanceDto>(occurrences.Count);
+        var snapshotsByDate = new Dictionary<DateTime, DailyBalanceSnapshot>();
         decimal totalIncome = 0, totalExpenses = 0;
 
-        foreach (var t in sorted)
+        foreach (var occurrence in occurrences)
         {
+            var t = occurrence.Source;
+            var before = runningBalance;
             runningBalance += t.Amount;
 
-            if (t.Amount >= 0)
-                totalIncome += t.Amount;
-            else
-                totalExpenses += Math.Abs(t.Amount);
+            if (t.Amount >= 0) totalIncome += t.Amount;
+            else totalExpenses += -t.Amount;
 
-            transactionsWithBalance.Add(new TransactionWithBalanceDto
+            transactions.Add(new TransactionWithBalanceDto
             {
                 TransactionId = t.TransactionId,
                 AccountId = t.AccountId,
                 Description = t.Description,
                 Amount = t.Amount,
-                StartDate = t.StartDate,
+                StartDate = occurrence.Date,
                 Category = t.Category,
                 RunningBalance = runningBalance,
                 BalanceChange = t.Amount,
                 Color = t.Color
             });
 
-            var dateKey = t.StartDate.UtcDateTime.Date;
-            if (!dailySnapshots.TryGetValue(dateKey, out var snapshot))
+            var day = occurrence.Date.UtcDateTime.Date;
+            if (!snapshotsByDate.TryGetValue(day, out var snapshot))
             {
                 snapshot = new DailyBalanceSnapshot
                 {
-                    Date = dateKey,
-                    StartOfDayBalance = runningBalance - t.Amount,
-                    LowestBalance = runningBalance - t.Amount
+                    Date = day,
+                    StartOfDayBalance = before,
+                    LowestBalance = before
                 };
-                dailySnapshots[dateKey] = snapshot;
+                snapshotsByDate[day] = snapshot;
             }
 
             snapshot.TransactionCount++;
             snapshot.EndOfDayBalance = runningBalance;
-
+            snapshot.DayChange = runningBalance - snapshot.StartOfDayBalance;
             if (t.Amount >= 0) snapshot.DayIncome += t.Amount;
-            else snapshot.DayExpenses += Math.Abs(t.Amount);
-
-            snapshot.DayChange = snapshot.EndOfDayBalance - snapshot.StartOfDayBalance;
-
+            else snapshot.DayExpenses += -t.Amount;
             if (runningBalance < snapshot.LowestBalance)
                 snapshot.LowestBalance = runningBalance;
-            // HasNegativeBalance evaluated after all transactions — see below.
         }
 
-        // Evaluate HasNegativeBalance once per snapshot using the final EndOfDayBalance,
-        // so intraday dips that recover by end of day do not flag the day as negative.
-        foreach (var s in dailySnapshots.Values)
-            s.HasNegativeBalance = s.EndOfDayBalance < 0;
+        // A day is "negative" by its closing balance, so an intraday dip that recovers is not flagged.
+        foreach (var snapshot in snapshotsByDate.Values)
+            snapshot.HasNegativeBalance = snapshot.EndOfDayBalance < 0;
 
-        var allDailySnapshots = new List<DailyBalanceSnapshot>();
-        var currentBalance = startingBalance;
+        // One snapshot per calendar day in range; quiet days carry the previous close forward.
+        var dailySnapshots = new List<DailyBalanceSnapshot>();
+        var carried = startingBalance;
 
-        for (var date = startDate.UtcDateTime.Date; date <= endDate.UtcDateTime.Date; date = date.AddDays(1))
+        for (var day = startDate.UtcDateTime.Date; day <= endDate.UtcDateTime.Date; day = day.AddDays(1))
         {
-            if (dailySnapshots.TryGetValue(date, out var snapshot))
+            if (snapshotsByDate.TryGetValue(day, out var snapshot))
             {
-                allDailySnapshots.Add(snapshot);
-                currentBalance = snapshot.EndOfDayBalance;
+                dailySnapshots.Add(snapshot);
+                carried = snapshot.EndOfDayBalance;
             }
             else
             {
-                allDailySnapshots.Add(new DailyBalanceSnapshot
+                dailySnapshots.Add(new DailyBalanceSnapshot
                 {
-                    Date = date,
-                    StartOfDayBalance = currentBalance,
-                    EndOfDayBalance = currentBalance,
-                    DayChange = 0,
-                    DayIncome = 0,
-                    DayExpenses = 0,
-                    TransactionCount = 0,
-                    LowestBalance = currentBalance,
-                    HasNegativeBalance = currentBalance < 0
+                    Date = day,
+                    StartOfDayBalance = carried,
+                    EndOfDayBalance = carried,
+                    LowestBalance = carried,
+                    HasNegativeBalance = carried < 0
                 });
             }
         }
@@ -354,15 +223,15 @@ public class CashFlowService : ICashFlowService
         {
             AccountId = account.AccountId,
             AccountName = account.AccountName,
-            StartDate = startDate.DateTime,
-            EndDate = endDate.DateTime,
+            StartDate = startDate,
+            EndDate = endDate,
             StartingBalance = startingBalance,
             EndingBalance = runningBalance,
             NetChange = runningBalance - startingBalance,
             TotalIncome = totalIncome,
             TotalExpenses = totalExpenses,
-            DailySnapshots = allDailySnapshots,
-            Transactions = transactionsWithBalance
+            DailySnapshots = dailySnapshots,
+            Transactions = transactions
         };
     }
 
@@ -383,15 +252,17 @@ public class CashFlowService : ICashFlowService
         var totalIncome = groups.Where(g => g.Type == "income").Sum(g => g.Total);
         var totalExpenses = groups.Where(g => g.Type == "expense").Sum(g => g.Total);
 
-        return groups.Select(g => new CategoryBreakdown
+        return groups.Select(g =>
         {
-            Category = g.Category ?? string.Empty,
-            Type = g.Type,
-            Total = g.Total,
-            TransactionCount = g.Count,
-            PercentageOfTotal = g.Type == "income"
-                ? (totalIncome > 0 ? g.Total / totalIncome * 100 : 0)
-                : (totalExpenses > 0 ? g.Total / totalExpenses * 100 : 0)
+            var typeTotal = g.Type == "income" ? totalIncome : totalExpenses;
+            return new CategoryBreakdown
+            {
+                Category = g.Category ?? string.Empty,
+                Type = g.Type,
+                Total = g.Total,
+                TransactionCount = g.Count,
+                PercentageOfTotal = typeTotal > 0 ? g.Total / typeTotal * 100 : 0
+            };
         }).ToList();
     }
 }

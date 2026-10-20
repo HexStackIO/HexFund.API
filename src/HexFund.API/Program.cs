@@ -1,88 +1,62 @@
 using HexFund.API.Extensions;
-using HexFund.API.Middleware;
 using HexFund.Infrastructure.Data;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Identity.Web;
 using Serilog;
-using Serilog.Events;
 
-// Configure Serilog early so startup errors are captured
+// Bootstrap logger so startup failures are captured before configuration is loaded.
 Log.Logger = new LoggerConfiguration()
-    .MinimumLevel.Information()
-    .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
-    .MinimumLevel.Override("Microsoft.EntityFrameworkCore.Database.Command", LogEventLevel.Information)
-    .Enrich.FromLogContext()
     .WriteTo.Console()
-    .WriteTo.File(
-        path: "logs/hexfund-.log",
-        rollingInterval: RollingInterval.Day,
-        retainedFileCountLimit: 30,
-        outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
-    .CreateLogger();
+    .CreateBootstrapLogger();
 
 try
 {
-    Log.Information("Starting up");
-
     var builder = WebApplication.CreateBuilder(args);
 
-    builder.Host.UseSerilog();
+    // Levels and overrides come from the "Serilog" section of appsettings.
+    builder.Host.UseSerilog((context, services, logger) => logger
+        .ReadFrom.Configuration(context.Configuration)
+        .ReadFrom.Services(services)
+        .Enrich.FromLogContext()
+        .WriteTo.Console()
+        .WriteTo.File(
+            path: "logs/hexfund-.log",
+            rollingInterval: RollingInterval.Day,
+            retainedFileCountLimit: 30,
+            outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}"));
 
-    // Services
     builder.Services.AddResponseOptimization();
     builder.Services.AddDatabase(builder.Configuration);
     builder.Services.AddApplicationServices();
     builder.Services.AddCorsPolicy(builder.Environment, builder.Configuration);
+    builder.Services.AddExceptionHandling();
+    builder.Services.AddApiAuthorization(builder.Configuration);
+    builder.Services.AddApiRateLimiting();
 
-    try
-    {
-        builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-            .AddMicrosoftIdentityWebApi(options =>
-            {
-                options.Audience = builder.Configuration["AzureAd:ClientId"];
-            },
+    builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+        .AddMicrosoftIdentityWebApi(
+            options => options.Audience = builder.Configuration["AzureAd:ClientId"],
             identityOptions =>
             {
-                identityOptions.Authority = $"{builder.Configuration["AzureAd:Instance"]}{builder.Configuration["AzureAd:TenantId"]}/v2.0";
+                identityOptions.Authority =
+                    $"{builder.Configuration["AzureAd:Instance"]}{builder.Configuration["AzureAd:TenantId"]}/v2.0";
                 identityOptions.ClientId = builder.Configuration["AzureAd:ClientId"];
                 identityOptions.TenantId = builder.Configuration["AzureAd:TenantId"];
             });
-    }
-    catch (Exception ex)
-    {
-        Log.Fatal(ex, "Authentication setup failed");
-        throw;
-    }
 
-    builder.Services.AddControllers(options =>
-    {
-        // ── Global validation filter ──────────────────────────────────────
-        // Handles ModelState rejection AND input sanitization for every
-        // action automatically. Individual controllers no longer need
-        // if (!ModelState.IsValid) guards.
-        options.Filters.Add<ValidationActionFilter>();
-    })
-        .ConfigureApiBehaviorOptions(options =>
-        {
-            // Suppress the default automatic 400 response from [ApiController]
-            // so our ValidationActionFilter controls the response shape instead,
-            // giving us a consistent ValidationErrorResponse format everywhere.
-            options.SuppressModelStateInvalidFilter = true;
-        })
+    // [ApiController] returns a ValidationProblemDetails 400 for invalid models automatically.
+    builder.Services.AddControllers()
         .AddJsonOptions(options =>
             options.JsonSerializerOptions.DefaultIgnoreCondition =
                 System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull);
 
-    builder.Services.AddEndpointsApiExplorer();
     builder.Services.AddSwagger();
 
-    // Middleware pipeline
     var app = builder.Build();
 
     app.UseResponseCompression();
-    app.UseGlobalExceptionHandler();
-    app.UseRequestLogging();
+    app.UseExceptionHandler();
     app.UseSerilogRequestLogging();
 
     if (app.Environment.IsDevelopment())
@@ -96,52 +70,31 @@ try
     }
 
     app.UseHttpsRedirection();
-    app.UseCors("AllowAll");
+    app.UseCors(ApiPolicies.Cors);
     app.UseAuthentication();
     app.UseAuthorization();
+    app.UseRateLimiter();
     app.MapControllers();
 
-    // Migrate on startup
-    using (var scope = app.Services.CreateScope())
+    // Production schema changes are applied by the deployment pipeline (see the migrate job);
+    // applying them on startup is a local-development convenience only.
+    if (app.Environment.IsDevelopment())
     {
-        var db = scope.ServiceProvider.GetRequiredService<HexFundDbContext>();
-        try
-        {
-            if (db.Database.CanConnect())
-            {
-                Log.Information("DB connected");
-                var pending = db.Database.GetPendingMigrations().ToList();
-                if (pending.Count > 0)
-                {
-                    Log.Information("Applying {Count} pending migration(s)", pending.Count);
-                    db.Database.Migrate();
-                    Log.Information("Migrations applied");
-                }
-                else
-                {
-                    Log.Information("DB up to date");
-                }
-            }
-            else
-            {
-                Log.Warning("Cannot connect to database");
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Error(ex, "DB startup error: {Message}", ex.Message);
-        }
+        using var scope = app.Services.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<HexFundDbContext>().Database.MigrateAsync();
     }
 
     Log.Information("Running | Environment: {Environment}", app.Environment.EnvironmentName);
-
-    app.Run();
+    await app.RunAsync();
 }
-catch (Exception ex)
+catch (Exception ex) when (ex is not HostAbortedException)
 {
     Log.Fatal(ex, "Host terminated unexpectedly");
+    return 1;
 }
 finally
 {
-    Log.CloseAndFlush();
+    await Log.CloseAndFlushAsync();
 }
+
+return 0;

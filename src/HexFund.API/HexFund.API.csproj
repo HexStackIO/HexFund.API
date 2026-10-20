@@ -1,12 +1,10 @@
-﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
 	<PropertyGroup>
 		<TargetFramework>net10.0</TargetFramework>
 		<Nullable>enable</Nullable>
 		<ImplicitUsings>enable</ImplicitUsings>
-		<!-- Enable server garbage collection for better throughput -->
 		<ServerGarbageCollection>true</ServerGarbageCollection>
-		<!-- Enable concurrent garbage collection -->
 		<ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
 		<!-- User Secrets for local development - never commit secrets to git -->
 		<UserSecretsId>hexfund-api-secrets</UserSecretsId>
@@ -19,28 +17,20 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<!-- Core ASP.NET packages - using 8.0 for stability with .NET 10 -->
-        <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.3" />
-        <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.*" />
-        <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.*">
+		<PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.13" />
+		<PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.32">
 			<PrivateAssets>all</PrivateAssets>
 			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
 		</PackageReference>
-        <PackageReference Include="Microsoft.Identity.Web" Version="4.4.0" />
-
-		<!-- Swagger -->
-        <PackageReference Include="Swashbuckle.AspNetCore" Version="6.*" />
-
-		<!-- Logging -->
-        <PackageReference Include="Serilog.AspNetCore" Version="8.0.*" />
-        <PackageReference Include="Serilog.Sinks.Console" Version="5.*" />
-        <PackageReference Include="Serilog.Sinks.File" Version="5.*" />
-
-        <!-- Performance and caching: Microsoft.Extensions.Caching.Memory is provided by the shared framework; remove explicit package reference -->
+		<PackageReference Include="Microsoft.Identity.Web" Version="4.16.1" />
+		<PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
+		<PackageReference Include="Serilog.AspNetCore" Version="8.0.3" />
+		<PackageReference Include="Serilog.Sinks.Console" Version="5.0.1" />
+		<PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
 	</ItemGroup>
 
 	<ItemGroup>
-	  <Folder Include="logs\" />
+		<Folder Include="logs\" />
 	</ItemGroup>
 
 </Project>
