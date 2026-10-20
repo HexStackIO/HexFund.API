@@ -389,6 +389,23 @@ dotnet tool run dotnet-ef migrations add <Name> --project ../HexFund.Infrastruct
 dotnet tool run dotnet-ef database update --project ../HexFund.Infrastructure --startup-project .
 ```
 
+### Database tests
+
+`src/HexFund.IntegrationTests` holds tests that need a real PostgreSQL: migrations, the user and
+account delete cascades, the amendment foreign key, UTC timestamps, the unique category index,
+`jsonb` diagnostics, and the feedback outbox claim (including six claimers racing for the same rows).
+They are skipped unless a connection string is provided:
+
+```bash
+# any server where the user may create databases, for example your local dev server
+export HEXFUND_TEST_DB="Host=localhost;Username=postgres;Password=<password>"
+dotnet test src/HexFund.IntegrationTests
+```
+
+Each run creates a uniquely named database, applies every migration to it, and drops it at the end,
+so databases that already exist on the server (such as `HexFund_Dev`) are never touched. Without the
+variable the tests report as skipped, so `dotnet test` and the pull request check still pass.
+
 ### Repository layout
 
 ```
@@ -401,7 +418,8 @@ HexFund.API/
     ├── HexFund.Application/         services, calculation, DTOs, validation
     ├── HexFund.Core/                entities, enums, repository interfaces
     ├── HexFund.Infrastructure/      EF Core, repositories, cache, Graph, migrations
-    └── HexFund.Tests/               xUnit tests
+    ├── HexFund.Tests/               xUnit tests (no database)
+    └── HexFund.IntegrationTests/    xUnit tests against a real PostgreSQL (opt in)
 ```
 
 ---

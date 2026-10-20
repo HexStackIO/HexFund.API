@@ -38,7 +38,7 @@ public class FeedbackRepository : IFeedbackRepository
         var leaseUntil = now + lease;
         var pending = (int)FeedbackOutboxStatus.Pending;
 
-        return await _context.Feedback
+        var claimed = await _context.Feedback
             .FromSqlInterpolated($"""
                 UPDATE "Feedback"
                 SET "Attempts" = "Attempts" + 1,
@@ -53,6 +53,9 @@ public class FeedbackRepository : IFeedbackRepository
                 RETURNING *
                 """)
             .ToListAsync();
+
+        // RETURNING does not preserve the subquery order, so restore a stable, oldest-first order.
+        return claimed.OrderBy(f => f.CreatedAt).ToList();
     }
 
     public async Task MarkSentAsync(Guid id, int issueNumber)
