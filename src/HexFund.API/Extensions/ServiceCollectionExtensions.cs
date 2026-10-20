@@ -139,7 +139,12 @@ public static class ServiceCollectionExtensions
 
     public static IServiceCollection AddExceptionHandling(this IServiceCollection services)
     {
-        services.AddProblemDetails();
+        services.AddProblemDetails(options =>
+            options.CustomizeProblemDetails = context =>
+            {
+                if (context.HttpContext.Items[CorrelationIdMiddleware.ItemKey] is string correlationId)
+                    context.ProblemDetails.Extensions["correlationId"] = correlationId;
+            });
         services.AddExceptionHandler<ApiExceptionHandler>();
         return services;
     }

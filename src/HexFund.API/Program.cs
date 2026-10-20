@@ -1,4 +1,5 @@
 using HexFund.API.Extensions;
+using HexFund.API.Middleware;
 using HexFund.Infrastructure.Data;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
@@ -10,6 +11,9 @@ Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
     .CreateBootstrapLogger();
 
+const string LogOutputTemplate =
+    "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] [{CorrelationId}] [v{AppVersion}] {Message:lj}{NewLine}{Exception}";
+
 try
 {
     var builder = WebApplication.CreateBuilder(args);
@@ -19,12 +23,15 @@ try
         .ReadFrom.Configuration(context.Configuration)
         .ReadFrom.Services(services)
         .Enrich.FromLogContext()
-        .WriteTo.Console()
+        // Defaults for log lines written outside a request; request values from LogContext win.
+        .Enrich.WithProperty("CorrelationId", "-")
+        .Enrich.WithProperty("AppVersion", "-")
+        .WriteTo.Console(outputTemplate: LogOutputTemplate)
         .WriteTo.File(
             path: "logs/hexfund-.log",
             rollingInterval: RollingInterval.Day,
             retainedFileCountLimit: 30,
-            outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}"));
+            outputTemplate: LogOutputTemplate));
 
     builder.Services.AddResponseOptimization();
     builder.Services.AddDatabase(builder.Configuration);
@@ -56,6 +63,7 @@ try
     var app = builder.Build();
 
     app.UseResponseCompression();
+    app.UseMiddleware<CorrelationIdMiddleware>();
     app.UseExceptionHandler();
     app.UseSerilogRequestLogging();
 

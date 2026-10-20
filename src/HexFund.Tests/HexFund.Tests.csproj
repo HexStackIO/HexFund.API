@@ -9,6 +9,7 @@
 
 	<ItemGroup>
 		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+		<PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.*" />
 		<PackageReference Include="xunit" Version="2.9.*" />
 		<PackageReference Include="xunit.runner.visualstudio" Version="2.8.*" />
 		<PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="8.0.*" />
@@ -18,10 +19,15 @@
 		<ProjectReference Include="..\HexFund.Core\HexFund.Core.csproj" />
 		<ProjectReference Include="..\HexFund.Application\HexFund.Application.csproj" />
 		<ProjectReference Include="..\HexFund.Infrastructure\HexFund.Infrastructure.csproj" />
+		<ProjectReference Include="..\HexFund.API\HexFund.API.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>
 		<Using Include="Xunit" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<FrameworkReference Include="Microsoft.AspNetCore.App" />
 	</ItemGroup>
 
 </Project>

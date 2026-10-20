@@ -1,10 +1,12 @@
 using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.AspNetCore.Mvc;
 
 namespace HexFund.API.Middleware;
 
 /// <summary>
 /// Turns unhandled exceptions into RFC 7807 problem responses.
+///   BadHttpRequestException     -> its own status (for example 413 for an oversized body)
 ///   ArgumentException           -> 400, message returned (our own validation text)
 ///   UnauthorizedAccessException -> 401, e.g. a token without the expected identity claim
 ///   anything else               -> 500 with a generic message; details go to the log only
@@ -25,6 +27,7 @@ public class ApiExceptionHandler : IExceptionHandler
     {
         var (status, title, detail) = exception switch
         {
+            BadHttpRequestException e => (e.StatusCode, ReasonPhrases.GetReasonPhrase(e.StatusCode), "The request could not be processed."),
             ArgumentException e => (StatusCodes.Status400BadRequest, "Bad Request", e.Message),
             UnauthorizedAccessException => (StatusCodes.Status401Unauthorized, "Unauthorized", "Authentication is required."),
             _ => (StatusCodes.Status500InternalServerError, "Internal Server Error", "An unexpected error occurred.")
