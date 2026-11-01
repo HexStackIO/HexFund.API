@@ -64,7 +64,7 @@ accumulating them against an account balance.
 | **Categories** | A per-user list that works across all of the user's accounts. |
 | **Colours** | Optional colour per transaction for the calendar. |
 | **Profile and sign-in** | Sign-in is handled by Microsoft Entra External ID. The user can edit their display name. |
-| **In-app feedback** | Users send a bug, idea or question (with optional device diagnostics). It is stored immediately and forwarded in the background as a private issue for triage, without any user identifier. |
+| **In-app feedback** | Users send a bug, idea or question (with optional device diagnostics). It is stored immediately and forwarded in the background as an issue in a private tracker repository, without any user identifier. The maintainer reads and sorts the issues by hand; nothing replies to the user. |
 | **Account deletion** | One call removes the user's sign-in identity and all of their data. This is what app-store policies require. |
 
 ### What the user would notice (selling points grounded in the implementation)
@@ -197,6 +197,8 @@ App --POST /api/feedback--> API --stores a Pending row--> PostgreSQL (the outbox
                                           |  GitHub App installation token
                                           v
                   private repo (issue labelled needs-triage, source-app, bug|feature|question)
+                                          |
+                          the maintainer reads and sorts issues by hand
 ```
 
 1. **Submit.** `POST /api/feedback` validates and normalises the report and saves it with status `Pending`. It returns `202 Accepted` right away; creating the issue is never done inline. Saving the row also wakes the dispatcher.
@@ -204,7 +206,7 @@ App --POST /api/feedback--> API --stores a Pending row--> PostgreSQL (the outbox
 3. **Retry.** Failures are retried after 1 minute, 5 minutes, 30 minutes, 2 hours, then every 6 hours, each spread by up to 20% either way. A longer `Retry-After` from GitHub wins. After 8 attempts, or on an error that can never succeed (for example a rejected payload), the row becomes `Failed` and is logged at Error. Before any retry the dispatcher looks for an issue carrying the report's marker, so an issue that was created but not acknowledged (timeout, crash) is adopted rather than duplicated.
 4. **Retain.** Once a day, `Sent` rows older than `Feedback:RetentionMonths` (default 12) are deleted. `Pending` and `Failed` rows are never deleted by age. Deleting a row does not delete its issue.
 
-**What goes into an issue.** A title like `[Bug] first line of the report` (at most 70 characters, with `@` and `#` neutralised so it cannot mention anyone or link to another issue); the labels `needs-triage`, `source-app` and the type label (`bug`, `feature` or `question`); and a body with a hidden `<!-- hexfund-feedback:<id> -->` marker, the submission time, the report text inside a code fence longer than any backtick run in the text, then the diagnostics and a table of recent API errors (every value rendered as an escaped code span). It never contains the user id, email, name, IP address, account names or amounts. The feedback id is the only link back to a person, and it exists only in the database.
+**What goes into an issue.** A title like `[Bug] first line of the report` (at most 70 characters, with `@` and `#` neutralised so it cannot mention anyone or link to another issue); the labels `needs-triage` (the "not reviewed yet" inbox label, removed by hand once an issue has been looked at), `source-app` and the type label (`bug`, `feature` or `question`); and a body with a hidden `<!-- hexfund-feedback:<id> -->` marker, the submission time, the report text inside a code fence longer than any backtick run in the text, then the diagnostics and a table of recent API errors (every value rendered as an escaped code span). It never contains the user id, email, name, IP address, account names or amounts. The feedback id is the only link back to a person, and it exists only in the database.
 
 **GitHub App.** The API authenticates as a GitHub App: it signs a short-lived RS256 JWT with the app private key, exchanges it for an installation token, and caches that token until about 5 minutes before it expires. The key, JWT and token are never logged. With `GitHub:Enabled=false` (local development, tests) a no-op tracker marks reports sent with a fake issue number, so nothing needs GitHub credentials.
 
@@ -534,11 +536,12 @@ that is still running.
 - Feedback report text is never logged at Information or above; only ids, statuses and attempt counts are.
 - The dispatcher logs a warning when the oldest pending report has been waiting more than an hour, and an error when a report is marked `Failed`. Check the log stream after changing GitHub settings.
 
-### Operations note: feedback follow-up
+### Operations note: finding who sent a report
 
-Triage happens on the issues in the private tracker repository, which hold no personal data. To
-contact the person behind an issue (for follow-up only), take the id from the issue's hidden marker
-line, `<!-- hexfund-feedback:<id> -->`, and look it up in the database:
+Issues in the private tracker repository hold no personal data, and nothing replies to reporters:
+changes are communicated through the What's New section of the app. When you do need to know whose
+data a report is about (for example to reproduce a balance problem), take the id from the issue's
+hidden marker line, `<!-- hexfund-feedback:<id> -->`, and look it up in the database:
 
 ```sql
 SELECT f."Id", f."Type", f."CreatedAt", u."Email", u."FirstName"
@@ -627,6 +630,20 @@ Suggestions inferred from the code and its limits. None of these exist yet.
 - A "My feedback" endpoint and status updates (for example a GitHub webhook that marks a report resolved), once there is a reason to tell users what happened to a report.
 - Attach a screenshot to a report; automatic redaction of obvious personal data in report text.
 - Run the dispatcher on a schedule (a timer-triggered job) or move to a plan with Always On if report latency while idle ever matters.
+
+### Feedback feature: status and remaining work
+
+The in-app feedback flow is a human workflow: reports become issues in a private repository and the
+maintainer reads them. There is no automated triage and no reply channel; updates reach users through
+the app's What's New section. The code is complete; what is left is rollout.
+
+1. **Merge the feedback pull requests in order** (correlation ids and persistence are already merged; the application layer, endpoint, dispatcher, docs and database tests follow). Re-check the test count and the "Not covered yet" paragraph in section 9 once they are all in.
+2. **Production database.** The `AddFeedback` migration is applied by the pipeline when it reaches `master`. Confirm the `Feedback` table exists after the first deploy.
+3. **GitHub integration.** Create the GitHub App (Issues: read and write), install it on the tracker repository only, then set `GitHub__Enabled=true`, `GitHub__AppId`, `GitHub__InstallationId`, `GitHub__PrivateKeyBase64` and `GitHub__TrackerRepo` in Azure. Until then the no-op tracker marks reports as sent with fake issue numbers, so no real issue is created.
+4. **Tracker repository.** Keep it private and strip the leftover triage automation (see the tracker repository's README for the labels and templates that remain).
+5. **End-to-end check.** Submit a report from a test build, confirm one issue appears with the expected labels and no identifier, and confirm the row is `Sent` with an issue number.
+6. **Store paperwork.** Update the privacy policy in the UI repository and the Play Data safety form before the first build that includes the feedback screen ships.
+7. **Process.** Decide how to handle a request to remove a deleted user's issues (see the operations note and limitations).
 
 ---
 
