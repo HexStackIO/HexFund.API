@@ -4,4 +4,5 @@ public static class ApiPolicies
 {
     public const string Cors = "HexFundClients";
     public const string AccountDeletionRateLimit = "account-deletion";
+    public const string FeedbackRateLimit = "feedback";
 }

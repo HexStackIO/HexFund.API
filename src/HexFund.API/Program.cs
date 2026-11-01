@@ -40,6 +40,7 @@ try
     builder.Services.AddExceptionHandling();
     builder.Services.AddApiAuthorization(builder.Configuration);
     builder.Services.AddApiRateLimiting();
+    builder.Services.AddFeedbackDelivery(builder.Configuration);
 
     builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         .AddMicrosoftIdentityWebApi(
